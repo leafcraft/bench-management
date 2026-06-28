@@ -1,0 +1,20 @@
+{
+  "_entry_point": "person_rolling_off",
+  "_description": "Consultant rolling off a 6-month engagement \u2014 needs allocation in next 2 weeks.",
+  "payload": {
+    "consultant_id": "cons-lina-2023-014",
+    "consultant_name": "Lina O.",
+    "level": "senior_consultant",
+    "rolling_off_engagement": "eng-stratos-q1",
+    "available_from": "2026-06-22",
+    "skills": [
+      "financial_modeling",
+      "manufacturing",
+      "lean_ops"
+    ],
+    "preferred_locations": [
+      "EU",
+      "remote"
+    ]
+  }
+}

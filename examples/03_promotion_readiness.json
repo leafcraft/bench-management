@@ -1,0 +1,14 @@
+{
+  "_entry_point": "promotion_readiness",
+  "_description": "Manager nominates engineer for promotion \u2014 talent_development assembles readiness assessment + gaps.",
+  "payload": {
+    "candidate_id": "cons-prashant-2024-009",
+    "candidate_name": "Prashant V.",
+    "current_level": "consultant",
+    "target_level": "senior_consultant",
+    "tenure_months": 38,
+    "client_facing_hours_12mo": 1840,
+    "billable_pct_12mo": 0.84,
+    "manager_email": "rm.sara@example"
+  }
+}

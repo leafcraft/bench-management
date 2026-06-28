@@ -1,0 +1,10 @@
+{
+  "_entry_point": "weekly_bench_review",
+  "_description": "Monday sweep \u2014 workforce_analytics runs the 30/60/90d projection + utilisation sweep; talent_development flags >2 week idle.",
+  "payload": {
+    "cycle": "2026-W23",
+    "bench_count": 14,
+    "total_consultants": 130,
+    "bench_pct_target": 0.1
+  }
+}

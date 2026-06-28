@@ -1,0 +1,19 @@
+{
+  "_entry_point": "new_project_kickoff",
+  "_description": "New 6-month project needs 4 senior consultants \u2014 staffing_coordinator finds 7 candidates and builds the assignment plan.",
+  "payload": {
+    "plan_id": "alloc-pegasus-q3",
+    "project_id": "proj-pegasus-q3",
+    "client_id": "cli-pegasus-industries",
+    "duration_weeks": 26,
+    "required_skills": [
+      "market_research",
+      "european_regulatory",
+      "B2B_logistics",
+      "financial_modeling"
+    ],
+    "required_level": "senior",
+    "billable_target_pct": 0.8,
+    "start_date": "2026-07-01"
+  }
+}
