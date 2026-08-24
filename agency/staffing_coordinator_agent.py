@@ -30,6 +30,7 @@ from typing import Any
 from leafmesh import LeafMeshLogger, chain, pre_compose
 
 from agency._shared import store
+from agency._shared.session_stash import resolve_session_id, stash_put
 
 logger = LeafMeshLogger(__name__)
 
@@ -135,6 +136,14 @@ async def enforce_allocation_floors(result: dict[str, Any], ctx: Any) -> dict[st
             f"[coordinator] floor: conflicts={len(conflicts)} "
             f"structural_gap={structural} plan={out['plan_id']}"
         )
+
+    # Stash the plan so the allocation booker (finisher) can recover it AFTER the
+    # human approval gate — the SDK resumes the chain with only the human reply,
+    # so the assignments would otherwise be dropped across the gate.
+    sid = resolve_session_id({}, ctx if isinstance(ctx, dict) else {})
+    if sid:
+        stash_put(sid, {"plan_id": out["plan_id"], "assignments": out["assignments"],
+                        "matches": out.get("matches") or []})
     return out
 
 

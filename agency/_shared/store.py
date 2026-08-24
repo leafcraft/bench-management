@@ -472,3 +472,61 @@ def book_assignment(consultant_id: str, opportunity_id: str,
         _save("utilisation", u)
 
     return dict(rec)
+
+
+# ── Candidate-screening claim queue (the atomic backlog for instances) ───────
+# When candidate_screening_agent fans out into N parallel instances, each copy
+# must screen a DISJOINT batch of benched consultants — otherwise they duplicate
+# work (the doctrine's "without a claim tool copies duplicate work"). The queue
+# is per-session, seeded once from the benched roster, and popped atomically
+# under a lock so concurrent instances never claim the same consultant. This is
+# ephemeral working state (in-process, per activation), NOT a system of record —
+# so it lives in memory, keyed by session_id, and is rebuilt each activation.
+_SCREEN_LOCK = threading.Lock()
+_SCREEN_QUEUES: dict[str, list[dict[str, Any]]] = {}
+_SCREEN_SEEDED: set[str] = set()
+
+
+def ensure_screening_queue(session_id: str, only_available: bool = True) -> int:
+    """Idempotently seed the per-session screening backlog from the benched
+    roster (with each consultant's skills attached for scoring). Safe to call
+    from every instance's @pre_compose — only the first seeds; returns the
+    number of consultants currently waiting to be screened."""
+    if not session_id:
+        return 0
+    with _SCREEN_LOCK:
+        if session_id in _SCREEN_SEEDED:
+            return len(_SCREEN_QUEUES.get(session_id, []))
+        queue = [
+            {"consultant_id": r["consultant_id"], "name": r.get("name", ""),
+             "level": r.get("level", ""), "idle_weeks": int(r.get("idle_weeks", 0)),
+             "skills": [s.get("skill") for s in consultant_skills(r["consultant_id"])]}
+            for r in bench_roster(only_available=only_available)
+        ]
+        _SCREEN_QUEUES[session_id] = queue
+        _SCREEN_SEEDED.add(session_id)
+        return len(queue)
+
+
+def claim_screening_batch(session_id: str, batch_size: int = 4) -> list[dict[str, Any]]:
+    """Atomically claim (pop) up to `batch_size` benched consultants from the
+    session's screening backlog. Concurrent instances serialise on the lock, so
+    each pulls a disjoint batch; an empty list means the backlog is drained."""
+    if not session_id:
+        return []
+    try:
+        n = max(1, int(batch_size))
+    except (TypeError, ValueError):
+        n = 1
+    with _SCREEN_LOCK:
+        queue = _SCREEN_QUEUES.get(session_id) or []
+        batch, _SCREEN_QUEUES[session_id] = queue[:n], queue[n:]
+        return [dict(c) for c in batch]
+
+
+def screening_remaining(session_id: str) -> int:
+    """How many consultants are still waiting to be screened this session."""
+    if not session_id:
+        return 0
+    with _SCREEN_LOCK:
+        return len(_SCREEN_QUEUES.get(session_id) or [])

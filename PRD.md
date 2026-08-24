@@ -1,203 +1,250 @@
-# Bench Management — PRD
+# Bench-Management Pod — PRD
 
 ## Story
 
-It's Monday. **Priya Nair, a staffing partner**, gets a `new_project_kickoff`
-for a new data-platform engagement. `workforce_analytics_agent` calls the
-firm's PSA/HRIS through its n8n connector and returns the live 30/60/90-day
-utilisation forecast, current bench %, and skills inventory — from Workday,
-not a local copy. Because `mode == 'forecast'` the work flows to
-`staffing_coordinator_agent`, which matches consultants to the engagement and
-builds an assignment plan (`plan-3f9c01ab2d`) with in-prompt conflict
-detection. **Lina** is double-booked, so `requires_engagement_lead_review`
-fires and the plan routes to the **engagement lead** (default-deny gate; 4h →
-practice lead). The same forecast showed bench at 17%, above the 15% ceiling,
-so the visible `bench_pct_current > 0.15` wire also reaches the **practice
-lead**. A `person_rolling_off` event has `talent_development_agent` draft
-Lina a six-month career path that lands with **talent ops**. Every terminal
-decision is appended to a hash-chained WORM audit.
+It's Monday. **Priya Nair, a staffing partner**, fires `new_project_kickoff` for
+a new data-platform engagement. The **bench coordinator** opens the case and
+hands it to `workforce_analytics_agent`, which serves the live 30/60/90-day
+utilisation forecast, current bench %, and skills inventory — from the PSA/HRIS
+via n8n day-1, the seed store day-0. Because `mode == 'forecast'` the case flows
+to `candidate_screening_agent`, whose **parallel instances** each atomically
+claim a disjoint batch of the bench and shortlist candidates against the open
+opportunities. The combined shortlist reaches `staffing_coordinator_agent` — a
+**super-agent** that plans the allocation (`plan-3f9c01ab2d`). **Lina** is
+double-booked, so the `@chain` re-derives the conflict and routes to the
+**engagement lead** (default-deny gate; 4h → the Manager escalates to the
+practice lead). On approval, `allocation_booker_agent` — the **finisher** —
+re-checks the approval (unknown verdict fails closed), refuses to double-book,
+renders the booking confirmation to `./out`, and records it. The same forecast
+showed bench over the 15% ceiling → the visible `bench_pct_current > 0.15` wire
+reached the **practice lead**; a `person_rolling_off` event had
+`talent_development_agent` draft Lina a six-month career path to **talent ops**.
+Every terminal decision is appended to a hash-chained WORM audit.
 
 ## Why it works in an organization
 
-Utilisation is the firm's P&L. This agency turns the weekly bench scramble
-into a forward-flow DAG with the alert thresholds visible as `can_call` wires
-instead of buried in code or someone's head, keeps the high-judgment calls
-behind named, default-deny human gates, and keeps the system of record in the
-PSA/HRIS the firm already runs. It accelerates the routine and *surfaces* the
-hard decisions rather than making them silently.
+Utilisation is the firm's P&L. This **pod** turns the weekly bench scramble into
+a forward flow with the alert thresholds visible as `can_call` wires instead of
+buried in code or someone's head, keeps the high-judgment calls behind named,
+default-deny human gates, and keeps the system of record in the PSA/HRIS the firm
+already runs. One human, one agent, one system per stage: the agent produces, the
+human decides, the system records — and silence never advances a decision.
 
 ## Flow
 
 ```
 new_project_kickoff ─┐
-weekly_bench_review ─┤
-utilisation_ingest  ─┤   ┌─────────────────────────────┐
-manual_action       ─┼──▶│ workforce_analytics_agent   │ (programmatic / n8n → PSA/HRIS)
-skill_upsert/search ─┘   │  forecast | ingest | report  │
-                         │  | upsert | search           │
+case_status         ─┼──▶ bench_coordinator_agent (llm, coordinator)
+manual_action       ─┘        open_case ─▶ analytics ; talent ─▶ talent_dev ; escalate ─▶ practice_lead
+
+weekly_bench_review ─┐   ┌─────────────────────────────┐
+utilisation_ingest  ─┤   │ workforce_analytics_agent   │ (programmatic / n8n → PSA/HRIS)
+utilisation_report  ─┼──▶│  forecast|ingest|report|     │  + weekly wake_up cron (timezone-pinned)
+skill_upsert/search ─┘   │  upsert|search               │
                          └───┬───────────┬───────────┬──┘
        mode==forecast        │           │ bench>15% │ below_floor!=[]
                              ▼           ▼           ▼
-                  ┌──────────────────┐  practice    staffing
-                  │ staffing_        │   _lead       _partner
-                  │ coordinator      │  (human)      (human)
-                  │ (llm)            │
-                  └──┬────┬──────┬───┘
+              ┌────────────────────┐  practice    staffing
+              │ candidate_         │   _lead       _partner
+              │ screening (llm ×2  │  (human)      (human)
+              │ instances + claim) │
+              └────────┬───────────┘
+              shortlist != []
+                       ▼
+              ┌────────────────────┐
+              │ staffing_          │ (llm super-agent)
+              │ coordinator        │  @pre_compose supply/demand · @chain routing floor
+              └──┬────┬──────┬─────┘
    practice_lead_review  │ conflict/eng_review  │ clean
         ▼               ▼                       ▼
    practice_lead   engagement_lead        staffing_partner
      (human)          (human)                 (human)
+                       │ approved                │ approved
+                       └───────────┬────────────┘
+                                   ▼
+                        allocation_booker_agent (FINISHER)
+                          re-check approval · no double-book · render ./out · delete-on-block
+                                   ▼
+                        bench_audit_logger_agent  [terminal WORM]
 
 person_rolling_off ─┐
-career_path_request ─┼──▶ talent_development_agent (llm)
-annual_review_path  ─┤        idle_4w or senior-flight-risk ─▶ practice_lead (human)
-promotion_readiness ─┘        idle_2w or recommendations    ─▶ talent_ops    (human)
+career_path_request ─┼──▶ talent_development_agent (llm + playbook)
+promotion_readiness ─┘        idle_4w or senior-flight-risk ─▶ practice_lead (human)
+                              idle_2w or recommendations    ─▶ talent_ops    (human)
 
 draft_performance_review ──▶ performance_review_agent (llm)
-        requires_calibration ─▶ practice_lead ;  else ─▶ engagement_lead
+        requires_calibration ─▶ practice_lead ; else ─▶ engagement_lead
 
 launch_esat_pulse / analyse_esat_survey ──▶ esat_survey_agent (llm + salt ledger)
         requires_hrbp_review ─▶ talent_ops (human)
 
-weekly_bench_review (direct) ──▶ weekly_bench_sweep_agent (programmatic / n8n; cron commented)
-
-ALL human gates ──▶ bench_audit_logger_agent (external custom / hash-chained WORM)  [terminal]
+ALL human gates default-deny on silence (held_for_review) ──▶ bench_audit_logger_agent [terminal]
+Human→human escalation is the Manager SUPERVISOR's job (manager.escalation), not a hardcoded wire.
 ```
 
 ## Actor inventory
 
 | Actor | Job title | Type |
 |---|---|---|
-| `workforce_analytics_agent` | Workforce analyst | programmatic (n8n) |
-| `staffing_coordinator_agent` | Staffing coordinator | llm |
+| `bench_coordinator_agent` | Bench coordinator | llm (pure YAML) |
+| `workforce_analytics_agent` | Workforce analyst | programmatic (n8n) + shaper |
+| `candidate_screening_agent` | Candidate-screening analyst | llm (×2 instances) |
+| `staffing_coordinator_agent` | Staffing coordinator | llm (super-agent) |
 | `talent_development_agent` | Talent development lead | llm |
-| `performance_review_agent` | Performance review writer | llm |
-| `esat_survey_agent` | Employee-experience analyst | llm (+ Python ledger) |
+| `performance_review_agent` | Performance-review writer | llm |
+| `esat_survey_agent` | Employee-experience analyst | llm (+ Python salt ledger) |
 | `weekly_bench_sweep_agent` | Bench-report runner | programmatic (n8n) |
+| `allocation_booker_agent` | Allocation booker (finisher) | programmatic + `@chain` floor |
 | `staffing_partner_human` | Staffing partner | human |
 | `engagement_lead_human` | Engagement lead | human |
 | `talent_ops_human` | Talent ops / HRBP | human |
 | `practice_lead_human` | Practice lead | human |
 | `bench_audit_logger_agent` | Compliance recorder | external (custom) |
 
+## Modern capabilities (fitted to the domain)
+
+- **super_agent** (DICT form) on `staffing_coordinator_agent` — autonomous
+  plan/execute/verify across many people × opportunities:
+  `super_agent: {cost_ceiling: 100000, wall_clock: 900}`. Never flat
+  `super_agent_*` keys.
+- **instances** on `candidate_screening_agent` — `instances: 2` +
+  `instances_handoff: last` fan the bench out to parallel copies; the atomic
+  `claim_screening_batch` tool (backed by the store's per-session queue) hands
+  each copy a **disjoint** batch, so a large bench is screened in parallel with
+  no double-work. Yields are list/sum-safe (`shortlist`, `unmatched`,
+  `screened_count` = SUM of disjoint batches) so `last` merges cleanly; the
+  `@chain` dedups and re-derives `screened_count`, and screening emits **no**
+  escalation boolean (a last-wins boolean could drop a `true`).
+- **timezone** — the live weekly `wake_up: "0 9 * * 1"` on
+  `workforce_analytics_agent` carries `timezone: "Asia/Kolkata"` (a bare cron
+  fires in UTC). `weekly_bench_sweep_agent`'s cron ships commented, with its
+  `timezone:` alongside, until the BI connector is wired.
+- **playbook** — per-intent craft on the staffing coordinator (`allocation`) and
+  talent dev (`talent`): only `description` rides in the prompt; `responsibility`
+  loads on demand so the prompt stays identity + output contract.
+- **mcp** — a commented `mcp:` block on `candidate_screening_agent` shows the
+  real PSA/HRIS shape (the SDK rejects an empty-URL http mcp at load); day-0 runs
+  on the dev-store tools in `agency/tools.py`.
+
 ## Data artifacts
 
 - **AllocationPlan** (`data_structures`): `plan_id`, `cycle`, `received_at_utc`.
+- **Shortlist** (screening yields): `shortlist`, `claimed_consultants`,
+  `screened_count`, `unmatched`, `screening_briefing`.
 - **Assignment plan** (coordinator yields): `matches`, `conflicts`,
-  `requires_engagement_lead_review`, `requires_practice_lead_review`, `plan_id`.
+  `requires_engagement_lead_review`, `requires_practice_lead_review`, `plan_id`,
+  `assignments` — stashed per session so the finisher recovers it across the gate.
+- **Booking confirmation** (finisher yields + `./out/{plan_id}_booking_confirmation.md`):
+  `assignment_ids`, `booked`, `rejected`, `booking_ok`, `artifact_path`,
+  `status` (booked|blocked), `block_reasons`.
 - **Career path** (talent dev yields): `skill_bets`, `internal_projects`,
   `certifications`, `retention_risk_score`, `employee_facing_narrative`,
   `confidence`, `requires_practice_lead_review`.
-- **Performance review** (review writer yields): `composite_score`,
-  `overall_rating`, `requires_calibration`, `requires_manager_signoff`.
-- **ESAT result** (survey yields): `engagement_index`, `avg_scores`,
-  `themes`, `response_rate`, `requires_hrbp_review`. Per-survey salt lives
-  only in `ESAT_LEDGER_DB`, never in mesh state.
+- **Performance review** / **ESAT result** — unchanged (composite score + rating;
+  engagement index + themes; per-survey salt only in `ESAT_LEDGER_DB`).
 - **Audit entry** (WORM sink): `audit_event_id`, `written_at_utc`,
   `hash_chain_prev`, `hash_chain_current`.
 
 ## Per-agent spec
 
-- **workforce_analytics_agent** — programmatic n8n connector with a
-  co-located shaper (`agency/workforce_analytics_agent.py`, auto-binds as the
-  `@sdk.intelligence` fn). DEV: serves the forecast / ledger / skills from
-  `agency/_shared/store.py` so the chain runs day-0. PROD: the n8n workflow
-  reads `mode`, queries the PSA/HRIS, and the shaper maps its response. The
-  **bench % and the 65%-billable below-floor list (3+ weeks) are computed in
-  the module** — the deterministic analytics floor — and re-asserted from the
-  store even when a connector under-reports, so the `bench > 0.15` and
-  `below_floor != []` wires can't be silenced. Routes: forecast→coordinator;
+- **bench_coordinator_agent** — pure-YAML llm coordinator. Owns the case; routes
+  `open_case`→analytics, `talent`→talent dev, `escalate`→practice lead. Never
+  reads the PSA, matches, or books.
+- **workforce_analytics_agent** — programmatic n8n + co-located shaper
+  (`agency/workforce_analytics_agent.py`). DEV serves the forecast/ledger/skills
+  from the store; PROD shapes the n8n response. The **bench % and 65%-billable
+  below-floor list (3+ weeks) are computed in the module** and re-asserted from
+  the store, so `bench > 0.15` / `below_floor != []` can't be silenced. Weekly
+  timezone-pinned `wake_up` (mode=forecast). Routes: forecast→screening;
   bench>0.15→practice lead; below-floor→staffing partner.
-- **staffing_coordinator_agent** — llm + `agency/staffing_coordinator_agent.py`.
-  **`@pre_compose`** (`pull_supply_and_demand`) pulls the available bench, open
-  opportunities and skills inventory so the LLM reasons over real supply/demand
-  (lands in `context["prepared_data"]`). **`@chain`** (`enforce_allocation_floors`)
-  re-derives double-booking conflicts from the matches and re-checks whether a
-  single skill gap blocks 2+ open opportunities, then **forces**
-  `requires_engagement_lead_review` / `requires_practice_lead_review` — the LLM
-  can't waive the routing. Three mutually-exclusive routes gated on
-  `requires_practice_lead_review` (structural gap) → engagement-lead (conflict)
-  → staffing-partner (clean).
+- **candidate_screening_agent** — llm ×2 instances +
+  `agency/candidate_screening_agent.py`. `@pre_compose` (`prime_screening`) sets
+  the session (identity from code) so the atomic claim keys the backlog, seeds
+  the backlog once, and hands `open_opportunities` + `backlog_size` to the model;
+  `@chain` (`normalise_screening`) dedups the merged shortlist and re-derives
+  `screened_count`. Route: non-empty shortlist → staffing coordinator.
+- **staffing_coordinator_agent** — llm super-agent +
+  `agency/staffing_coordinator_agent.py`. `@pre_compose` pulls supply/demand;
+  `@chain` (`enforce_allocation_floors`) re-derives double-booking + structural
+  gaps, **forces** the routing flags, and **stashes the plan** (session_stash)
+  for the finisher. Three mutually-exclusive routes: structural gap→practice
+  lead, conflict→engagement lead, clean→staffing partner. `allocation` playbook.
 - **talent_development_agent** — llm + `agency/talent_development_agent.py`.
-  **`@pre_compose`** (`pull_idle_ledger`) pulls the deterministic idle ledger
-  (2w/4w lists + average) from the bench feed. **`@chain`**
-  (`enforce_idle_and_retention_floors`) overwrites the idle lists from that
-  ledger (the LLM can't invent or drop idle staff), clamps the scores, caps a
-  weak career-path's confidence at 0.4, and **forces** the senior-flight-risk
-  escalation when `retention_risk_score >= 0.7` AND level ∈ {senior, staff,
-  partner}. Practice-lead route fires on `idle_4w` OR that flag; talent-ops on
-  idle/reskilling.
-- **performance_review_agent** — llm; deterministic composite-score formula +
-  rating bands in the prompt. Calibration tails → practice lead; normal →
-  engagement lead. Drafts only — the signed review of record lives in the HRIS.
-- **esat_survey_agent** — llm + the salted-hash ledger
-  (`agency/esat_survey_agent.py`). The ledger mints the per-survey salt with
-  `secrets` and hashes responder ids; the salt is never yielded, logged, or
-  passed to the LLM. `requires_hrbp_review` folds in the numeric floors AND a
-  high-frequency hot theme → talent ops.
+  `@pre_compose` pulls the idle ledger; `@chain` overwrites the idle lists (the
+  LLM can't invent/drop idle staff), clamps scores, caps a weak path's confidence
+  at 0.4, and forces the senior-flight-risk escalation. `talent` playbook.
+- **performance_review_agent** — llm; composite-score formula + rating bands
+  resident in the prompt (needed every turn). Calibration tails→practice lead;
+  normal→engagement lead. Drafts only.
+- **esat_survey_agent** — llm + salted-hash ledger
+  (`agency/esat_survey_agent.py`); the salt is never yielded, logged, or passed
+  to the LLM. `requires_hrbp_review`→talent ops.
 - **weekly_bench_sweep_agent** — n8n connector to the PSA/BI Monday report;
-  `wake_up` cron commented out until the connector is wired.
+  `wake_up` cron + `timezone` commented until wired.
+- **allocation_booker_agent** (FINISHER) — programmatic +
+  `@chain(enforce_booking_floors)`. Two-layer defence: the body short-circuits
+  unless a human approved (allow-token allowlist + block-token denylist, unknown
+  fails closed) and recovers the plan from the session stash; the `@chain` floor
+  re-checks the approval independently, renders `./out/{plan_id}_booking_
+  confirmation.md`, and **deletes it on a blocked floor** (`status=blocked` +
+  `block_reasons`). The store's `book_assignment` refuses any slice past 100%
+  (double-booking floor). DEV books in the store (a real record, never a faked
+  ack); PROD shapes the PSA booking ack. → audit terminus.
 - **human gates** — staffing partner (4h), engagement lead (4h), talent ops
-  (6h), practice lead (8h). All `fallback_on_timeout: true`, default-deny;
-  partner/lead/ops escalate to the practice lead on timeout, practice lead
-  holds. `operator_ids` left unset → shared inbox.
-- **bench_audit_logger_agent** — external `framework: custom`; the
-  intelligence fn is registered in `main.py` via
-  `audit_logger.register(leafmesh, "bench_audit_logger_agent")`. Terminal.
+  (6h), practice lead (8h). All `fallback_on_timeout: true`, `fallback_response`
+  → `held_for_review`, routed to the audit sink. `dual` only on these boundary
+  agents; they call chain/programmatic/execute agents, never another `dual`
+  agent. `operator_ids` unset → shared inbox. Human→human escalation is the
+  Manager's job.
+- **bench_audit_logger_agent** — external `framework: custom`; registered in
+  `main.py` via `audit_logger.register(leafmesh, "bench_audit_logger_agent")`.
+  Terminal.
 
-## Entry points
+## Entry points (17)
 
-`new_project_kickoff`, `person_rolling_off`, `weekly_bench_review`,
-`skills_assessment_update`, `manual_action`, `utilisation_ingest`,
-`utilisation_report`, `skill_upsert`, `skills_search`, `career_path_request`,
-`annual_review_path`, `promotion_readiness`, plus direct-call entries for the
-coordinator, talent dev, weekly sweep, performance review, and the two ESAT
-modes (18 total).
+`new_project_kickoff`, `case_status`, `manual_action`, `weekly_bench_review`,
+`person_rolling_off`, `utilisation_ingest`, `utilisation_report`, `skill_upsert`,
+`skills_search`, `career_path_request`, `promotion_readiness`,
+`draft_performance_review`, `launch_esat_pulse`, `analyse_esat_survey`, plus
+direct-call doors for candidate screening and the staffing coordinator, and a
+`staffing_decision` HITL-resume door. Every entry is `condition: always`.
 
 ## Controls / trust
 
+- **Coordinator + finisher + supervisor** — a coordinator owns each case; the
+  finisher is the only actuator (behind the gate, fails closed, deletes on
+  block); the Manager supervises and escalates stalls.
 - **Default-deny human gates** on every high-judgment / irreversible step;
-  timeout fallbacks route to a real edge (validated).
-- **Visible alert wires + enforced floors** — the routing thresholds are
-  `can_call` conditions (legible), and the *values* they fire on are computed
-  in deterministic `@chain` / shaper floors (trustworthy): the bench %, the
-  below-floor list, the idle ledger, double-booking, structural gaps and
-  senior flight risk are code, not a prompt the LLM can soften. Every promised
-  route is an enforced edge (no soft narration).
-- **Structural anonymity** — the ESAT salt is generated and stored only in
-  the local ledger; identities exist downstream only as `sha256(salt + id)`.
-- **Hash-chained WORM audit** terminates every branch; insertion/deletion is
-  detectable post-hoc.
-- **Manager escalation** — three targets: human (practice lead), webhook
-  (PagerDuty), channel (Slack). `auto_escalate` on retries/errors/timeout.
+  silence resolves to `held_for_review` → audit.
+- **Visible alert wires + enforced floors** — routing thresholds are `can_call`
+  conditions (legible); the values they fire on (bench %, below-floor, idle
+  ledger, double-booking, structural gaps, senior flight risk) are computed in
+  deterministic `@chain` / shaper floors (trustworthy). No soft narration route.
+- **Atomic claim for fan-out** — parallel screening copies never double-work.
+- **Structural anonymity** — the ESAT salt lives only in the local ledger;
+  identities exist downstream only as `sha256(salt + id)`.
+- **Hash-chained WORM audit** terminates every branch.
+- **Manager escalation** — human (practice lead) + inert webhook; `auto_escalate`
+  on retries/errors/timeout.
+
+## 2.4.131 correctness
+
+Every agent has an explicit `name:`; every llm prompt ends with an OUTPUT
+CONTRACT naming exactly its yields; `dual` is only on human boundary agents (no
+dual→dual — verified 0 dual warnings at load); the `mcp:` block is commented (no
+empty `${VAR:}` url); `max_tool_calls_per_message: 15` on the tool-chaining
+agents; every llm agent fn is `async def f(llm_response, input_data, context)`;
+`super_agent` is dict form; `timeouts.llm_hard_timeout_s` lands with the 2.4.131
+floor. `requirements.txt` is core-only (`leafmesh>=2.4.131` + `apscheduler>=3.10`).
 
 ## Config pointer
 
 Roles are in `configs/config.yaml`. Python is confined to floors + controls:
-`agency/_shared/store.py` (dev bench/skills/opportunities/utilisation feeds),
-`agency/workforce_analytics_agent.py` (analytics shaper + bench/below-floor
-math), `agency/staffing_coordinator_agent.py` (`@pre_compose` + allocation
-`@chain` floor), `agency/talent_development_agent.py` (`@pre_compose` +
-idle/retention `@chain` floor), `agency/esat_survey_agent.py` (salt ledger),
-and `agency/_shared/audit_logger.py` (WORM sink). Run `python
-validate_config.py` before `python main.py`.
-
-## Reflection / decisions
-
-- **YAML-first, code where it must be**: the original capacity-forecaster /
-  skills-matcher / idle-detector / reskilling-recommender modules were
-  collapsed into three mode-dispatched LLM/connector roles with their
-  thresholds as visible `can_call` wires. The *values* those wires fire on are
-  computed in code (bench %, below-floor, idle, double-booking, structural
-  gaps, senior flight risk) so neither the LLM nor a soft n8n workflow can
-  waive routing — a `@pre_compose` to pull real context and a `@chain` to
-  enforce the floor, per agent. The dev store makes the whole chain runnable
-  day-0; the anonymity control stays Python.
-- **No conductor hub**: work flows forward; originators step out; the only
-  cycles are the bounded human-gate timeout escalations.
-- **Unenforced narration removed**: the coordinator's structural-gap route,
-  talent dev's senior-flight-risk route, and ESAT's hot-theme route are now
-  enforced edges / flags rather than prompt-only promises.
-- **State in the customer's systems**: utilisation/bench/skills live in the
-  PSA/HRIS; the template ships no SQLite system of record (the salt ledger is
-  a control store, not business state).
+`agency/tools.py` (dev-store tools + atomic claim), `agency/_shared/store.py`
+(dev feeds + screening queue + booking ledger), `agency/_shared/session_stash.py`
+(plan recovery across the gate), `agency/workforce_analytics_agent.py`,
+`agency/candidate_screening_agent.py`, `agency/staffing_coordinator_agent.py`,
+`agency/talent_development_agent.py`, `agency/allocation_booker_agent.py`
+(finisher), `agency/esat_survey_agent.py` (salt ledger),
+`agency/_shared/audit_logger.py` (WORM sink). Run `python validate_config.py`
+before `python main.py`.

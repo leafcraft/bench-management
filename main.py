@@ -1,15 +1,23 @@
-"""bench-management — Bench Management.
+"""bench-management — Bench-Management Pod (LeafMesh).
 
-Roles are defined in configs/config.yaml. workforce_analytics +
-weekly_bench_sweep are n8n connector agents against your PSA / HRIS /
-BI tool (PSA_WEBHOOK_URL / BENCH_REPORT_WEBHOOK_URL); workforce
-analytics also carries a co-located shaper that serves a dev store
-(agency/_shared/store.py) day-0 and computes the bench/below-floor
-floor. The staffing-coordinator and talent-development LLM agents each
-carry a @pre_compose (pull their own context) + @chain (enforce the
-deterministic routing floor) module. The ESAT salted-hash
-anonymisation ledger (agency/esat_survey_agent.py) and the WORM audit
-sink registered below complete the Python surface.
+Boot order matters (SDK 2.4.131):
+  1. import agency.tools  → the @global_tool decorators run BEFORE from_yaml/
+     start, so the candidate-screening analyst's claim_screening_batch /
+     read_open_opportunities / read_bench_roster are registered.
+  2. LeafMesh.from_yaml(...) → auto_discover wires agency/*_agent.py to the YAML.
+  3. audit_logger.register(...) → attach the WORM sink to the custom external
+     bench_audit_logger_agent (must be after from_yaml, before start).
+  4. leafmesh.start().
+
+Roles are defined in configs/config.yaml. workforce_analytics + weekly_bench_sweep
+are n8n connector agents against your PSA / HRIS / BI tool (PSA_WEBHOOK_URL /
+BENCH_REPORT_WEBHOOK_URL); workforce analytics carries a co-located shaper that
+serves a dev store (agency/_shared/store.py) day-0 and computes the bench/
+below-floor floor. candidate_screening, staffing_coordinator and
+talent_development are LLM agents with @pre_compose (pull their own context) +
+@chain (enforce the deterministic floor). The allocation booker is the finisher;
+the ESAT salted-hash ledger and the WORM audit sink registered below complete the
+Python surface.
 """
 import asyncio
 import signal
@@ -18,6 +26,7 @@ import sys
 from dotenv import load_dotenv
 from leafmesh import EventType, LeafMesh, LeafMeshLogger
 
+import agency.tools  # noqa: F401 — registers @global_tool tools before start()
 from agency._shared import audit_logger as _audit_logger
 
 load_dotenv()
