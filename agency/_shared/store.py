@@ -14,10 +14,11 @@ holds the four feeds the roles reason over:
   * the **utilisation history** — weekly billable / available hours per
     consultant (analytics derives the below-floor flag + bench %).
 
-Production: replace each reader with the matching PSA/HRIS pull behind
-the n8n connector (PSA_WEBHOOK_URL); the function signatures are the
-contract. Setting the env var alone does nothing until the workforce
-analytics shaper routes the connector's raw response through here.
+Production: workforce analytics, the weekly report and the booker each read
+the PSA/HRIS through their own n8n workflow once wired (vault connections
+psa_n8n / bench_report_n8n / psa_booking_n8n); the screening and planning
+reads here stay on this store until you replace them with your PSA calls (or
+wire the psa_mcp tools). The function signatures are the contract.
 
 This is a DEV STAND-IN, not a system of record (Rule 7): nothing here
 is the firm's authoritative state. Writes (utilisation ingest, skill
@@ -62,78 +63,114 @@ _LEVELS = {"junior", "mid", "senior", "staff", "partner"}
 
 
 # ── Seed data ────────────────────────────────────────────────────────
-# A realistic ~14-person services bench. idle_weeks > 0 means currently
-# benched; on_engagement names the active engagement (or "" if benched).
+# Halvorsen Partners (fictional): a 24-consultant delivery practice of a
+# mid-size services firm. Two engagements ended in October, so six people are
+# on the bench (25%, over the 15% ceiling — this Monday's practice-lead alert).
+# idle_weeks > 0 means currently benched; on_engagement names the active
+# engagement ("" if benched). Clients are fictional.
 _SEED_ROSTER = [
-    {"consultant_id": "c-lina-2021-007",   "name": "Lina Okafor",   "level": "senior",  "idle_weeks": 2, "on_engagement": ""},
-    {"consultant_id": "c-prashant-2024-009","name": "Prashant Rao",  "level": "mid",     "idle_weeks": 5, "on_engagement": ""},
-    {"consultant_id": "c-mei-2022-014",    "name": "Mei Tanaka",    "level": "staff",   "idle_weeks": 0, "on_engagement": "acme-data-platform"},
-    {"consultant_id": "c-diego-2023-021",  "name": "Diego Alvarez", "level": "mid",     "idle_weeks": 4, "on_engagement": ""},
-    {"consultant_id": "c-sara-2020-003",   "name": "Sara Klein",    "level": "senior",  "idle_weeks": 1, "on_engagement": ""},
-    {"consultant_id": "c-tom-2024-031",    "name": "Tom Becker",    "level": "junior",  "idle_weeks": 6, "on_engagement": ""},
-    {"consultant_id": "c-amara-2021-011",  "name": "Amara Nwosu",   "level": "staff",   "idle_weeks": 0, "on_engagement": "globex-cloud-migration"},
-    {"consultant_id": "c-leo-2023-018",    "name": "Leo Marchetti", "level": "mid",     "idle_weeks": 3, "on_engagement": ""},
-    {"consultant_id": "c-fatima-2022-006", "name": "Fatima Saleh",  "level": "senior",  "idle_weeks": 0, "on_engagement": "initech-ml-pilot"},
-    {"consultant_id": "c-noah-2024-040",   "name": "Noah Park",     "level": "junior",  "idle_weeks": 2, "on_engagement": ""},
-    {"consultant_id": "c-yara-2021-009",   "name": "Yara Haddad",   "level": "mid",     "idle_weeks": 0, "on_engagement": "acme-data-platform"},
-    {"consultant_id": "c-ivan-2020-002",   "name": "Ivan Petrov",   "level": "partner", "idle_weeks": 0, "on_engagement": "umbrella-strategy"},
-    {"consultant_id": "c-grace-2023-025",  "name": "Grace Liu",     "level": "mid",     "idle_weeks": 1, "on_engagement": ""},
-    {"consultant_id": "c-omar-2022-013",   "name": "Omar Farouk",   "level": "senior",  "idle_weeks": 0, "on_engagement": "globex-cloud-migration"},
+    # ── on the bench ──
+    {"consultant_id": "c-lina-2021-007",    "name": "Lina Okafor",    "level": "senior",  "idle_weeks": 2, "on_engagement": ""},
+    {"consultant_id": "c-prashant-2024-009","name": "Prashant Rao",   "level": "mid",     "idle_weeks": 5, "on_engagement": ""},
+    {"consultant_id": "c-diego-2023-021",   "name": "Diego Alvarez",  "level": "mid",     "idle_weeks": 4, "on_engagement": ""},
+    {"consultant_id": "c-tom-2024-031",     "name": "Tom Becker",     "level": "junior",  "idle_weeks": 6, "on_engagement": ""},
+    {"consultant_id": "c-sara-2020-003",    "name": "Sara Klein",     "level": "senior",  "idle_weeks": 1, "on_engagement": ""},
+    {"consultant_id": "c-leo-2023-018",     "name": "Leo Marchetti",  "level": "mid",     "idle_weeks": 3, "on_engagement": ""},
+    # ── on engagements ──
+    {"consultant_id": "c-mei-2022-014",     "name": "Mei Tanaka",     "level": "staff",   "idle_weeks": 0, "on_engagement": "brightwater-data-p1"},
+    {"consultant_id": "c-yara-2021-009",    "name": "Yara Haddad",    "level": "mid",     "idle_weeks": 0, "on_engagement": "brightwater-data-p1"},
+    {"consultant_id": "c-julia-2024-036",   "name": "Julia Novak",    "level": "junior",  "idle_weeks": 0, "on_engagement": "brightwater-data-p1"},
+    {"consultant_id": "c-amara-2021-011",   "name": "Amara Nwosu",    "level": "staff",   "idle_weeks": 0, "on_engagement": "corvane-wms-rollout"},
+    {"consultant_id": "c-omar-2022-013",    "name": "Omar Farouk",    "level": "senior",  "idle_weeks": 0, "on_engagement": "corvane-wms-rollout"},
+    {"consultant_id": "c-aisha-2023-022",   "name": "Aisha Bello",    "level": "mid",     "idle_weeks": 0, "on_engagement": "corvane-wms-rollout"},
+    {"consultant_id": "c-hannah-2019-001",  "name": "Hannah Weiss",   "level": "partner", "idle_weeks": 0, "on_engagement": "mirelle-claims-portal"},
+    {"consultant_id": "c-fatima-2022-006",  "name": "Fatima Saleh",   "level": "senior",  "idle_weeks": 0, "on_engagement": "mirelle-claims-portal"},
+    {"consultant_id": "c-elif-2024-038",    "name": "Elif Kaya",      "level": "junior",  "idle_weeks": 0, "on_engagement": "mirelle-claims-portal"},
+    {"consultant_id": "c-ivan-2020-002",    "name": "Ivan Petrov",    "level": "partner", "idle_weeks": 0, "on_engagement": "pinecrest-core-banking"},
+    {"consultant_id": "c-kofi-2022-017",    "name": "Kofi Asante",    "level": "senior",  "idle_weeks": 0, "on_engagement": "pinecrest-core-banking"},
+    {"consultant_id": "c-sven-2020-004",    "name": "Sven Lindqvist", "level": "senior",  "idle_weeks": 0, "on_engagement": "pinecrest-core-banking"},
+    {"consultant_id": "c-noah-2024-040",    "name": "Noah Park",      "level": "junior",  "idle_weeks": 0, "on_engagement": "halden-loyalty-app"},
+    {"consultant_id": "c-isabel-2023-027",  "name": "Isabel Duarte",  "level": "mid",     "idle_weeks": 0, "on_engagement": "halden-loyalty-app"},
+    {"consultant_id": "c-marco-2022-015",   "name": "Marco Bianchi",  "level": "senior",  "idle_weeks": 0, "on_engagement": "halden-loyalty-app"},
+    {"consultant_id": "c-grace-2023-025",   "name": "Grace Liu",      "level": "mid",     "idle_weeks": 0, "on_engagement": "talbot-analytics"},
+    {"consultant_id": "c-ravi-2021-012",    "name": "Ravi Menon",     "level": "staff",   "idle_weeks": 0, "on_engagement": "talbot-analytics"},
+    {"consultant_id": "c-daniel-2021-010",  "name": "Daniel Cho",     "level": "senior",  "idle_weeks": 0, "on_engagement": "talbot-analytics"},
 ]
 
-# Skills inventory — consultant_id → [{skill, level, last_used}].
+# Skills inventory — consultant_id → [{skill, level, last_used}]. Every benched
+# consultant is listed; engaged ones where their skills matter for search.
 _SEED_SKILLS = {
-    "c-lina-2021-007":    [{"skill": "data-engineering", "level": "expert", "last_used": "2026-05"},
-                           {"skill": "python", "level": "expert", "last_used": "2026-06"},
-                           {"skill": "spark", "level": "advanced", "last_used": "2026-04"}],
-    "c-prashant-2024-009":[{"skill": "react", "level": "advanced", "last_used": "2026-03"},
-                           {"skill": "typescript", "level": "advanced", "last_used": "2026-03"}],
-    "c-diego-2023-021":   [{"skill": "python", "level": "intermediate", "last_used": "2026-02"},
-                           {"skill": "data-engineering", "level": "intermediate", "last_used": "2026-01"}],
-    "c-sara-2020-003":    [{"skill": "cloud-architecture", "level": "expert", "last_used": "2026-05"},
-                           {"skill": "kubernetes", "level": "advanced", "last_used": "2026-05"},
-                           {"skill": "aws", "level": "expert", "last_used": "2026-06"}],
-    "c-tom-2024-031":     [{"skill": "javascript", "level": "intermediate", "last_used": "2026-04"}],
-    "c-leo-2023-018":     [{"skill": "ml-engineering", "level": "advanced", "last_used": "2026-04"},
-                           {"skill": "python", "level": "advanced", "last_used": "2026-05"}],
-    "c-noah-2024-040":    [{"skill": "qa-automation", "level": "intermediate", "last_used": "2026-03"}],
-    "c-grace-2023-025":   [{"skill": "data-engineering", "level": "advanced", "last_used": "2026-05"},
-                           {"skill": "sql", "level": "advanced", "last_used": "2026-06"}],
+    "c-lina-2021-007":    [{"skill": "data-engineering", "level": "expert", "last_used": "2026-10"},
+                           {"skill": "python", "level": "expert", "last_used": "2026-10"},
+                           {"skill": "spark", "level": "advanced", "last_used": "2026-09"}],
+    "c-prashant-2024-009":[{"skill": "react", "level": "advanced", "last_used": "2026-09"},
+                           {"skill": "typescript", "level": "advanced", "last_used": "2026-09"}],
+    "c-diego-2023-021":   [{"skill": "python", "level": "intermediate", "last_used": "2026-09"},
+                           {"skill": "data-engineering", "level": "intermediate", "last_used": "2026-09"},
+                           {"skill": "spark", "level": "intermediate", "last_used": "2026-08"}],
+    "c-tom-2024-031":     [{"skill": "javascript", "level": "intermediate", "last_used": "2026-09"},
+                           {"skill": "qa-automation", "level": "beginner", "last_used": "2026-08"}],
+    "c-sara-2020-003":    [{"skill": "cloud-architecture", "level": "expert", "last_used": "2026-10"},
+                           {"skill": "kubernetes", "level": "advanced", "last_used": "2026-10"},
+                           {"skill": "aws", "level": "expert", "last_used": "2026-10"}],
+    "c-leo-2023-018":     [{"skill": "ml-engineering", "level": "advanced", "last_used": "2026-09"},
+                           {"skill": "python", "level": "advanced", "last_used": "2026-10"}],
+    "c-noah-2024-040":    [{"skill": "qa-automation", "level": "intermediate", "last_used": "2026-10"}],
+    "c-grace-2023-025":   [{"skill": "data-engineering", "level": "advanced", "last_used": "2026-10"},
+                           {"skill": "sql", "level": "advanced", "last_used": "2026-10"}],
+    "c-amara-2021-011":   [{"skill": "cloud-architecture", "level": "expert", "last_used": "2026-10"},
+                           {"skill": "kubernetes", "level": "expert", "last_used": "2026-10"}],
+    "c-ravi-2021-012":    [{"skill": "ml-engineering", "level": "expert", "last_used": "2026-10"},
+                           {"skill": "python", "level": "expert", "last_used": "2026-10"}],
 }
 
-# Open opportunities / demand — engagements needing staffing.
+# Open opportunities / demand — signed or near-signed engagements needing
+# staffing (6 seats). Supply exists for all but the SAP work, which is a
+# single-opportunity gap (not structural: it blocks only one engagement).
 _SEED_OPPORTUNITIES = [
-    {"opportunity_id": "opp-acme-phase2", "client": "Acme", "title": "Data platform phase 2",
-     "required_skills": ["data-engineering", "spark"], "headcount": 2, "start": "2026-07", "status": "open"},
-    {"opportunity_id": "opp-wayne-cloud", "client": "Wayne", "title": "Cloud migration",
-     "required_skills": ["cloud-architecture", "kubernetes"], "headcount": 1, "start": "2026-07", "status": "open"},
-    {"opportunity_id": "opp-stark-ml", "client": "Stark", "title": "ML pipeline build",
-     "required_skills": ["ml-engineering", "python"], "headcount": 1, "start": "2026-08", "status": "open"},
-    {"opportunity_id": "opp-hooli-rt", "client": "Hooli", "title": "Realtime analytics",
-     "required_skills": ["data-engineering", "spark"], "headcount": 1, "start": "2026-07", "status": "open"},
+    {"opportunity_id": "opp-brightwater-data-p2", "client": "Brightwater Health",
+     "title": "Data platform phase 2", "required_skills": ["data-engineering", "spark", "python"],
+     "headcount": 2, "start": "2026-11-16", "status": "open"},
+    {"opportunity_id": "opp-corvane-eks", "client": "Corvane Logistics",
+     "title": "AWS landing zone + EKS migration", "required_skills": ["cloud-architecture", "kubernetes"],
+     "headcount": 1, "start": "2026-11-23", "status": "open"},
+    {"opportunity_id": "opp-mirelle-claims-ml", "client": "Mirelle Insurance",
+     "title": "Claims triage ML pipeline", "required_skills": ["ml-engineering", "python"],
+     "headcount": 1, "start": "2026-12-01", "status": "open"},
+    {"opportunity_id": "opp-halden-storefront", "client": "Halden Retail",
+     "title": "Storefront React rebuild", "required_skills": ["react", "typescript"],
+     "headcount": 1, "start": "2026-12-07", "status": "open"},
+    {"opportunity_id": "opp-ostrava-sap", "client": "Ostrava Foods",
+     "title": "SAP S/4HANA data migration", "required_skills": ["sap-data-migration"],
+     "headcount": 1, "start": "2026-12-14", "status": "open"},
 ]
 
 # Utilisation history — consultant_id → [{week_ending, billable_hours,
-# available_hours}], most recent last. Benched consultants show low
-# billable for the recent weeks (drives the below-floor flag).
+# available_hours}], the last three Fridays, most recent last. 40 available
+# hours a week. Partners bill less (business development). Four benched people
+# are under the 65% floor for all three weeks (Prashant, Diego, Tom, Leo);
+# Lina and Sara dipped only recently.
 def _hist(weeks: list[tuple[str, float, float]]) -> list[dict[str, Any]]:
     return [{"week_ending": w, "billable_hours": b, "available_hours": a} for w, b, a in weeks]
 
 
-_SEED_UTILISATION = {
-    # Mei — fully utilised on Acme.
-    "c-mei-2022-014": _hist([("2026-06-05", 38, 40), ("2026-06-12", 40, 40), ("2026-06-19", 39, 40)]),
-    # Lina — recently rolled off, dipping below floor 2 weeks.
-    "c-lina-2021-007": _hist([("2026-06-05", 36, 40), ("2026-06-12", 18, 40), ("2026-06-19", 10, 40)]),
-    # Prashant — long below floor (5 weeks idle), front-line below-floor case.
-    "c-prashant-2024-009": _hist([("2026-06-05", 8, 40), ("2026-06-12", 4, 40), ("2026-06-19", 6, 40)]),
-    # Diego — below floor 4 weeks.
-    "c-diego-2023-021": _hist([("2026-06-05", 12, 40), ("2026-06-12", 10, 40), ("2026-06-19", 8, 40)]),
-    # Amara — fully utilised.
-    "c-amara-2021-011": _hist([("2026-06-05", 40, 40), ("2026-06-12", 38, 40), ("2026-06-19", 40, 40)]),
-    # Tom — deep bench (junior, 6 weeks).
-    "c-tom-2024-031": _hist([("2026-06-05", 2, 40), ("2026-06-12", 0, 40), ("2026-06-19", 4, 40)]),
+_WEEKS = ("2026-10-16", "2026-10-23", "2026-10-30")
+_BILLABLE = {
+    "c-lina-2021-007": (36, 18, 10),     # rolled off two weeks ago
+    "c-prashant-2024-009": (8, 4, 6),    # five weeks on the bench
+    "c-diego-2023-021": (12, 10, 8),
+    "c-tom-2024-031": (2, 0, 4),
+    "c-sara-2020-003": (38, 36, 6),      # rolled off last week
+    "c-leo-2023-018": (20, 12, 8),
+    "c-mei-2022-014": (38, 40, 39), "c-yara-2021-009": (36, 38, 37), "c-julia-2024-036": (34, 36, 35),
+    "c-amara-2021-011": (40, 38, 40), "c-omar-2022-013": (37, 38, 36), "c-aisha-2023-022": (35, 36, 38),
+    "c-hannah-2019-001": (28, 30, 29), "c-fatima-2022-006": (38, 37, 39), "c-elif-2024-038": (33, 35, 36),
+    "c-ivan-2020-002": (30, 28, 31), "c-kofi-2022-017": (38, 39, 38), "c-sven-2020-004": (36, 37, 35),
+    "c-noah-2024-040": (34, 36, 35), "c-isabel-2023-027": (37, 36, 38), "c-marco-2022-015": (38, 38, 37),
+    "c-grace-2023-025": (36, 38, 37), "c-ravi-2021-012": (35, 34, 36), "c-daniel-2021-010": (39, 38, 38),
 }
+_SEED_UTILISATION = {cid: _hist([(w, float(b), 40.0) for w, b in zip(_WEEKS, hrs)])
+                     for cid, hrs in _BILLABLE.items()}
 
 
 def _now() -> str:
@@ -354,8 +391,9 @@ def idle_ledger() -> dict[str, Any]:
 # The allocation booker is an ACTUATOR: after a human approves a staffing
 # decision it BOOKS the assignment in the PSA (person → project → dates →
 # allocation%) and updates utilisation. PROD: the booking goes to the PSA
-# behind PSA_BOOKING_WEBHOOK_URL; DEV (no connector) it is recorded here so
-# the approval → book chain runs day-0 and produces a real artifact.
+# through the n8n workflow behind vault connection psa_booking_n8n; DEV (no
+# connector) it is recorded here so the approval → book chain runs day-0 and
+# produces a real artifact.
 #
 # Rule 7: this is a DEV STAND-IN, not the firm's system of record. Delete
 # ./data to reseed.
@@ -391,6 +429,16 @@ def consultant_availability(consultant_id: str) -> dict[str, Any]:
         "available_pct": max(0, MAX_ALLOCATION_PCT - booked),
         "max_pct": MAX_ALLOCATION_PCT,
     }
+
+
+def already_booked(plan_id: str, consultant_id: str, opportunity_id: str) -> bool:
+    """True when this plan already booked this consultant onto this opportunity."""
+    for a in _assignments().values():
+        if (a.get("status") == "booked" and a.get("plan_id") == plan_id
+                and a.get("consultant_id") == consultant_id
+                and a.get("opportunity_id") == opportunity_id):
+            return True
+    return False
 
 
 def assignment(assignment_id: str) -> dict[str, Any]:
@@ -474,12 +522,12 @@ def book_assignment(consultant_id: str, opportunity_id: str,
     return dict(rec)
 
 
-# ── Candidate-screening claim queue (the atomic backlog for instances) ───────
-# When candidate_screening_agent fans out into N parallel instances, each copy
+# ── Candidate-screening claim queue (the atomic backlog for copies) ──────────
+# When candidate_screening_agent fans out into N parallel copies, each copy
 # must screen a DISJOINT batch of benched consultants — otherwise they duplicate
 # work (the doctrine's "without a claim tool copies duplicate work"). The queue
 # is per-session, seeded once from the benched roster, and popped atomically
-# under a lock so concurrent instances never claim the same consultant. This is
+# under a lock so concurrent copies never claim the same consultant. This is
 # ephemeral working state (in-process, per activation), NOT a system of record —
 # so it lives in memory, keyed by session_id, and is rebuilt each activation.
 _SCREEN_LOCK = threading.Lock()
@@ -490,7 +538,7 @@ _SCREEN_SEEDED: set[str] = set()
 def ensure_screening_queue(session_id: str, only_available: bool = True) -> int:
     """Idempotently seed the per-session screening backlog from the benched
     roster (with each consultant's skills attached for scoring). Safe to call
-    from every instance's @pre_compose — only the first seeds; returns the
+    from every copy's @pre_compose — only the first seeds; returns the
     number of consultants currently waiting to be screened."""
     if not session_id:
         return 0
@@ -510,7 +558,7 @@ def ensure_screening_queue(session_id: str, only_available: bool = True) -> int:
 
 def claim_screening_batch(session_id: str, batch_size: int = 4) -> list[dict[str, Any]]:
     """Atomically claim (pop) up to `batch_size` benched consultants from the
-    session's screening backlog. Concurrent instances serialise on the lock, so
+    session's screening backlog. Concurrent copies serialise on the lock, so
     each pulls a disjoint batch; an empty list means the backlog is drained."""
     if not session_id:
         return []

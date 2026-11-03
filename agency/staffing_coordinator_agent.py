@@ -138,7 +138,7 @@ async def enforce_allocation_floors(result: dict[str, Any], ctx: Any) -> dict[st
         )
 
     # Stash the plan so the allocation booker (finisher) can recover it AFTER the
-    # human approval gate — the SDK resumes the chain with only the human reply,
+    # human approval step — the SDK resumes the chain with only the human reply,
     # so the assignments would otherwise be dropped across the gate.
     sid = resolve_session_id({}, ctx if isinstance(ctx, dict) else {})
     if sid:

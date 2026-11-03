@@ -4,22 +4,23 @@
 # team of specialists reads the bench, screens candidates (parallel fan-out),
 # plans the allocation, and develops idle talent; a FINISHER books the approved
 # assignment and produces the real artifact; named humans decide every gate; the
-# Manager is the SUPERVISOR that escalates stalls; a hash-chained WORM sink is
-# the terminus of every path.
+# Manager is the SUPERVISOR that escalates repeated errors; a hash-chained WORM
+# sink is the terminus of every path.
 #
 # THE FLOW (one human · one agent · one system per stage):
 #   coordinator opens the case -> workforce_analytics serves the forecast
 #   (bench %, below-floor, skills) -> candidate_screening fans out over the
-#   bench (instances + atomic claim) and shortlists -> staffing_coordinator
+#   bench (scaling.copies + atomic claim) and shortlists -> staffing_coordinator
 #   (super-agent) plans the allocation and DERIVES the routing floors ->
 #   a named human approves -> allocation_booker (the finisher) re-checks the
 #   approval, refuses to double-book, RENDERS the booking artifact to ./out,
 #   deletes it on a blocked floor -> WORM audit terminus. Talent development,
 #   performance review and ESAT are sibling specialists on their own entries.
 #
-# Every wire is CONDITIONAL on the producer's declared output; every HITL gate
-# DEFAULT-DENIES on silence (fallback -> held_for_review -> audit); the systems
-# of record (PSA / HRIS / BI) are TOOLS inside agents, never members.
+# Every wire is CONDITIONAL on the producer's declared output; nothing is booked
+# on silence (an unanswered card closes and the ticket records that no reply
+# came); the systems of record (PSA / HRIS / BI) are TOOLS inside agents, never
+# members.
 #
 # Design doctrine: ../claude_skills/leafmesh/building-agents-thoroughly.md
 # Nuances (2.4.131): ../claude_skills/leafmesh/nuances-and-gotchas.md
@@ -31,18 +32,6 @@ environment: "development"
 debug: true
 log_level: "INFO"
 
-persistence:
-  backend: redis
-  redis:
-    host: "${REDIS_HOST:localhost}"
-    port: ${REDIS_PORT:6379}
-    db: 0
-    password: "${REDIS_PASSWORD:}"
-    auto_storage: true
-    decode_responses: true
-    default_ttl: 86400
-    session_ttl: 2592000
-
 auto_discover:
   directory: "./agency"
   pattern: "*_agent.py"
@@ -52,11 +41,17 @@ auto_discover:
 # planner and the fanned-out screening can run long. (The `timeouts` block is
 # rejected by <=2.4.130, so it ships WITH the 2.4.131 floor, never before.)
 timeouts:
+  mesh_call_default_timeout_s: 120
   llm_hard_timeout_s: 300
 
-# The Manager is the SUPERVISOR — it watches every hand-off and escalates stalls,
-# contract violations, and repeated errors to the Practice Lead. It is NOT a
-# router in the middle of the team (routing is the can_call wires below).
+# The Manager is the SUPERVISOR. It escalates to the Practice Lead only on
+# errors: a non-retryable error (auth / bad request / bad config) the first time
+# it happens, 3 failed agents in one session (max_errors_per_session), or
+# restarts used up. Contract violations (yields not met) alert people; they do
+# not escalate. An unanswered question is not escalated: the card closes and the
+# ticket records it. Bench %, idle and structural-gap alerts reach the Practice
+# Lead through the agents' own can_call wires. It is NOT a router in the middle
+# of the team (routing is the can_call wires below).
 manager:
   model: "gpt-4o-mini"
   domain: "generic"
@@ -70,9 +65,9 @@ manager:
     the assignment and records it. Talent development, performance review and
     ESAT are sibling specialists.
 
-    Escalate to the Practice Lead when: bench % stays over the target ceiling, a
-    consultant is idle past its bound, a skills gap blocks 2+ opportunities, an
-    approval gate times out, or any agent hands off a malformed artifact. Silence
+    Bench % over the ceiling, 4-week idle staff and structural skills gaps
+    already reach the Practice Lead through the agents' own routes. You step in
+    on errors: an agent that keeps failing goes to the Practice Lead. Silence
     never advances a staffing decision.
   routing:
     mode: "static"
@@ -80,26 +75,24 @@ manager:
     targets:
       - type: "human_agent"
         agent: "practice_lead_human"
-      - type: "webhook"
-        url: "${PAGER_WEBHOOK:}"
-        method: "POST"
-        headers:
-          Content-Type: "application/json"
-        payload_template:
-          incident_id: "{{plan_id}}"
-          severity: "{{severity}}"
-          message: "{{message}}"
-          session_id: "{{session_id}}"
+      # Webhook escalation (e.g. PagerDuty): create the vault connection
+      # 'escalation_webhook' (an "Add custom" record on the Infrastructure
+      # page, service type 'Outbound webhook'), then uncomment — here before the
+      # first start, in Studio's YAML editor after it (applies live).
+      # - type: "webhook"
+        # connection: escalation_webhook   # vault connection holds the URL + headers
+        # method: "POST"
+        # payload_template:
+          # incident_id: "{{plan_id}}"
+          # severity: "{{severity}}"
+          # message: "{{message}}"
+          # session_id: "{{session_id}}"
     auto_escalate:
       max_retries: 2
       max_errors_per_session: 3
-      timeout_threshold: 2
   health_check_interval: 60
   agent_timeout_threshold: 300
   chain_completion_timeout: 600
-
-mesh:
-  call_timeout: 120
 
 data_structures:
   AllocationPlan:
@@ -132,6 +125,11 @@ entry_points:
   - name: "weekly_bench_review"
     target: "workforce_analytics_agent"
     description: "Weekly Monday bench-review sweep (also fires via wake_up cron)."
+    condition: always
+
+  - name: "weekly_bench_report"
+    target: "weekly_bench_sweep_agent"
+    description: "Build the weekly bench report (also fires Monday 08:00 via wake_up cron, before the 09:00 review)."
     condition: always
 
   - name: "person_rolling_off"
@@ -252,18 +250,23 @@ agents:
   # bench-ceiling and below-floor VALUES are computed in code (the floor) so the
   # can_call wires cannot be silenced by a soft workflow or a prompt.
   # agency/workforce_analytics_agent.py serves the store day-0 / shapes the
-  # connector response when wired.
+  # connector response when wired. The n8n lines ship commented: an n8n
+  # integration with no workflow address fails every call, and five failures
+  # in a row quarantine the agent, so its day-0 Python would stop running.
   # ─────────────────────────────────────────────────────────────────────────
   workforce_analytics_agent:
     name: "workforce_analytics_agent"
     agent_type: "programmatic"
     communication_type: "chain"
     description: "Workforce analyst — capacity forecast, utilisation ledger and skills inventory from your PSA/HRIS (deterministic bench/below-floor floor)."
-    integration: "n8n"
-    connector_config:
-      webhook_url: "${PSA_WEBHOOK_URL:}"        # n8n workflow → your PSA / HRIS
-      auth_token: "${PSA_WEBHOOK_TOKEN:}"
-      timeout: 60
+    # n8n workflow → your PSA / HRIS. Day 0 it is unwired (the Python serves
+    # the store). To wire it: create the vault connection 'psa_n8n' (on
+    # Infrastructure → Integrations → n8n: base URL = the workflow's webhook
+    # URL, token = its auth token), then uncomment the two lines below (here
+    # before the first start, in Studio's YAML editor after it). A webhook URL
+    # or token written here is refused at load.
+    # integration: "n8n"
+    # connector_config: {connection: psa_n8n, timeout: 60}
     # Weekly Monday bench-review sweep, in the firm's timezone (NOT UTC — a bare
     # cron pins to UTC). Also reachable via the weekly_bench_review entry point.
     # Set `timezone` to your business timezone.
@@ -328,12 +331,12 @@ agents:
 
   # ─────────────────────────────────────────────────────────────────────────
   # candidate_screening_agent — Candidate-Screening Analyst (AI, PARALLEL
-  # INSTANCES). Fans out over the benched roster: each of N instances atomically
+  # COPIES). Fans out over the benched roster: each of N copies atomically
   # CLAIMS a disjoint batch of consultants (claim_screening_batch) and scores
   # them against the open opportunities, so a large bench is screened in
   # parallel with no double-work. Deliberately SEPARATE from the allocation
   # planner (screening is not planning — a second role, a second pass). Yields
-  # are list/sum-safe so `instances_handoff: last` merges cleanly.
+  # are list/sum-safe so `scaling.copies.handoff: last` merges cleanly.
   # agency/candidate_screening_agent.py: @pre_compose seeds the claim queue +
   # supplies the demand; @chain normalises the merged shortlist.
   # ─────────────────────────────────────────────────────────────────────────
@@ -344,8 +347,11 @@ agents:
     model: "gpt-4o-mini"
     temperature: 0.1
     max_tool_calls_per_message: 15   # claim + score chain; default 5 truncates silently
-    instances: 2                     # 2 parallel copies per activation (2.4.118+)
-    instances_handoff: last          # COMBINE the copies' shortlists, route once
+    scaling:                      # 2.4.484 (was instances / instances_handoff)
+      copies:
+        mode: fixed
+        count: 2                     # 2 parallel copies per activation (2.4.118+)
+        handoff: last          # COMBINE the copies' shortlists, route once
     description: "Candidate-screening analyst — fans out over the bench, claims disjoint batches, shortlists candidates against open opportunities."
     prompt: |
       You are a Candidate-Screening Analyst, one of several copies running in
@@ -361,7 +367,8 @@ agents:
       against the real open_opportunities — do not invent people or roles.
 
       For each good fit, emit a shortlist row {consultant_id, opportunity_id,
-      fit_score (0..1), rationale}. List consultants you claimed but could not
+      fit_score (0..1), rationale}. Put the consultant_id of everyone you claimed
+      in "claimed_consultants", and the consultant_id of each one you could not
       place in "unmatched". Keep "screening_briefing" to one line: how many you
       screened and the strongest fit.
 
@@ -370,10 +377,18 @@ agents:
     enforce_yields: true
     enforce_yields_retry: 1
     yields:
-      shortlist: "list"
-      claimed_consultants: "list"
+      shortlist:
+        type: array
+        items:
+          type: object
+          fields:
+            consultant_id: string
+            opportunity_id: string
+            fit_score: number
+            rationale: string
+      claimed_consultants: { type: array, items: string }   # consultant_ids
       screened_count: "number"
-      unmatched: "list"
+      unmatched: { type: array, items: string }             # consultant_ids
       screening_briefing: "string"
     inputs:
       upstream_yields: "object"
@@ -383,14 +398,15 @@ agents:
     # itself (available:false) when it has no real source. See agency/tools.py.
     tools: [claim_screening_batch, read_open_opportunities, read_bench_roster]
     tool_categories: [screening, bench]
-    # ── To wire a real PSA/HRIS as MCP tools, uncomment and set the URL (each
-    #    named action under `use:` becomes its own namespaced tool, e.g.
-    #    psa_list_bench). NOTE: the SDK rejects an http mcp block with an EMPTY
-    #    url at load, so this ships COMMENTED — fill the URL, then uncomment. ──
+    # ── To wire a real PSA/HRIS as MCP tools: create the vault connection
+    #    'psa_mcp' (the MCP server's URL + token) on Infrastructure →
+    #    Integrations → MCP, then uncomment — here before the first start, in
+    #    Studio's YAML editor after it (each named action under `use:` becomes
+    #    its own namespaced tool, e.g. psa_list_bench). A URL or token written
+    #    here is refused at load. ──
     # mcp:
-    #   - transport: http
-    #     url: "${PSA_MCP_URL}"
-    #     token: "${PSA_MCP_TOKEN:}"
+    #   - connection: psa_mcp
+    #     transport: http
     #     use: [list_bench, list_opportunities, read_skills]
     #     name: psa
     #     timeout: 30
@@ -431,7 +447,8 @@ agents:
 
       Produce:
         - "matches": [{person_id, opportunity_id, fit_score, top_reason}]
-        - "unmatched_people" / "unmatched_opportunities"
+        - "unmatched_people" (consultant_ids) / "unmatched_opportunities"
+          (opportunity_ids)
         - "skills_gaps": [{skill, demand, supply}] where demand > supply
         - "staffing_briefing": 3-sentence narrative — match count + average fit,
           the single biggest gap (or "no gaps identified"), a recommendation.
@@ -465,14 +482,26 @@ agents:
              into assignments verbatim; the booker books only what a human approved.
         variables: [plan_id]
     yields:
-      matches: "list"
-      unmatched_people: "list"
-      unmatched_opportunities: "list"
-      skills_gaps: "list"
+      matches:
+        type: array
+        items:
+          type: object
+          fields: { person_id: string, opportunity_id: string, fit_score: number, top_reason: string }
+      unmatched_people: { type: array, items: string }          # consultant_ids
+      unmatched_opportunities: { type: array, items: string }   # opportunity_ids
+      skills_gaps:
+        type: array
+        items:
+          type: object
+          fields: { skill: string, demand: number, supply: number }
       staffing_briefing: "string"
       plan_id: "string"
-      assignments: "list"
-      conflicts: "list"
+      assignments:
+        type: array
+        items:
+          type: object
+          fields: { person_id: string, opportunity_id: string, fit_score: number, top_reason: string }
+      conflicts: { type: array, items: { type: object } }       # re-derived in code: {person_id, count}
       requires_engagement_lead_review: "boolean"
       requires_practice_lead_review: "boolean"
     inputs:
@@ -522,8 +551,9 @@ agents:
          {person_id, skill, why_now, source: "career_path"}.
       3. CAREER PATHS — on a career-path request, fill "employee_id",
          "current_level" (one of junior|mid|senior|staff|partner; else "mid"),
-         "target_role_6mo", "skill_bets" (3 max), "internal_projects",
-         "certifications", "retention_risk_score" (0..1), an
+         "target_role_6mo", "skill_bets" (3 max, each {skill, why_now}),
+         "internal_projects" (each {project_id, title}), "certifications"
+         (certification names), "retention_risk_score" (0..1), an
          "employee_facing_narrative" ("we see you", not "do this training"), and
          "confidence" (0..1). Quality floor: empty narrative or no internal
          projects → confidence must not exceed 0.4. When NO career path is
@@ -551,17 +581,17 @@ agents:
              capping confidence at 0.4 rather than dressing it up.
         variables: [employee_id]
     yields:
-      idle_2w: "list"
-      idle_4w: "list"
+      idle_2w: { type: array, items: { type: object } }         # re-asserted from the store
+      idle_4w: { type: array, items: { type: object } }         # re-asserted from the store
       avg_idle_weeks: "number"
-      recommendations: "list"
+      recommendations: { type: array, items: { type: object } }
       plan_id: "string"
       employee_id: "string"
       current_level: "string"
       target_role_6mo: "string"
-      skill_bets: "list"
-      internal_projects: "list"
-      certifications: "list"
+      skill_bets: { type: array, items: { type: object } }
+      internal_projects: { type: array, items: { type: object } }
+      certifications: { type: array, items: string }
       retention_risk_score: "number"
       employee_facing_narrative: "string"
       confidence: "number"
@@ -644,8 +674,8 @@ agents:
       period: "string"
       composite_score: "number"
       overall_rating: "string"
-      strengths: "list"
-      development_areas: "list"
+      strengths: { type: array, items: string }
+      development_areas: { type: array, items: string }
       engagement_sample_size: "number"
       avg_client_feedback: "number"
       utilisation_pct: "number"
@@ -724,13 +754,17 @@ agents:
       survey_id: "string"
       cohort: "string"
       cohort_size: "number"
-      questions: "list"
+      questions: { type: array, items: { type: array, items: string } }   # [key, text] pairs
       launched_at_utc: "string"
       response_count: "number"
       response_rate: "number"
       avg_scores: "object"
       engagement_index: "number"
-      themes: "list"
+      themes:
+        type: array
+        items:
+          type: object
+          fields: { theme: string, frequency_pct: number, sentiment: string, sample_quote: string }
       open_text_count: "number"
       requires_hrbp_review: "boolean"
     inputs:
@@ -745,33 +779,48 @@ agents:
     auto_store_yields: true
 
   # ─────────────────────────────────────────────────────────────────────────
-  # weekly_bench_sweep_agent — Bench-Report Runner (SYSTEM). The Monday bench
-  # report is produced by YOUR PSA / BI tool (Power BI, Looker, Tableau…); this
-  # agent triggers that workflow and returns the link + action items. Pure
-  # connector-YAML — no Python module. Enable its wake_up only after wiring.
+  # weekly_bench_sweep_agent — Bench-Report Runner (SYSTEM). Every Monday at
+  # 08:00 (before the 09:00 bench review) it builds the weekly bench report:
+  # bench %, below-floor consultants, idle ledger, open demand, and one action
+  # item per problem. Day 0 agency/weekly_bench_sweep_agent.py renders it from
+  # the dev store to ./out/bench_report_<ISO week>.md (re-running in the same
+  # week rewrites the same file). Reachable on demand via the
+  # weekly_bench_report entry point. The report is recorded in the WORM audit.
+  # To have YOUR PSA / BI tool (Power BI, Looker, Tableau…) produce it instead:
+  # create the vault connection 'bench_report_n8n' (same shape as psa_n8n),
+  # then uncomment the two n8n lines; the Python shapes the workflow's
+  # {report_url, action_items}. To post the finished report to a channel or
+  # BI inbox: add a webhook named 'bench_report_post' on Tools → Webhooks
+  # (it picks an Outbound webhook record), then uncomment `notify`. The post
+  # is fire-and-forget; nothing reads its reply.
   # ─────────────────────────────────────────────────────────────────────────
   weekly_bench_sweep_agent:
     name: "weekly_bench_sweep_agent"
     agent_type: "programmatic"
-    communication_type: "execute"
-    description: "Bench-report runner — triggers the weekly bench report in your PSA/BI tool and returns the link + action items."
-    integration: "n8n"
-    connector_config:
-      webhook_url: "${BENCH_REPORT_WEBHOOK_URL:}"   # n8n workflow → your PSA / BI report
-      auth_token: "${BENCH_REPORT_WEBHOOK_TOKEN:}"
-      timeout: 60
-    # wake_up: "0 8 * * 1"           # enable + set `timezone:` after wiring the BI connector
-    # timezone: "Asia/Kolkata"
+    communication_type: "chain"
+    description: "Bench-report runner — builds the Monday bench report (dev store day 0; your PSA/BI via n8n when wired) and returns the link + action items."
+    # integration: "n8n"
+    # connector_config: {connection: bench_report_n8n, timeout: 60}
+    # notify: {webhook: bench_report_post, when: done}
+    wake_up: "0 8 * * 1"             # Monday 08:00 ...
+    timezone: "Asia/Kolkata"         # ... in the firm's timezone, NOT UTC
+    wake_up_input:
+      trigger: weekly_bench_report
     yields:
       report_url: "string"
       action_items: "list"
+      week: "string"
+      source: "string"               # dev_store | bench_report_n8n
     inputs:
       trigger: "string"
-    can_call: []
+    can_call:
+      # The weekly report is a fact worth a WORM entry.
+      - agent: "bench_audit_logger_agent"
+        condition: "always"
 
   # ─────────────────────────────────────────────────────────────────────────
   # allocation_booker_agent — Allocation Booker (programmatic FINISHER). The
-  # actuator BEHIND the human approval gate. It never approves — it re-checks
+  # actuator BEHIND the human approval step. It never approves — it re-checks
   # that a human actually approved (allow-token allowlist + block-token denylist,
   # UNKNOWN verdict fails closed), refuses to double-book (the store's write-time
   # floor), RENDERS the booking confirmation artifact to ./out, DELETES the
@@ -784,11 +833,12 @@ agents:
     agent_type: "programmatic"
     communication_type: "chain"
     description: "Allocation booker (finisher) — re-checks the approval, refuses to double-book, renders the booking artifact, records it."
-    integration: "n8n"
-    connector_config:
-      webhook_url: "${PSA_BOOKING_WEBHOOK_URL:}"   # n8n workflow → your PSA booking write
-      auth_token: "${PSA_BOOKING_WEBHOOK_TOKEN:}"
-      timeout: 60
+    # n8n workflow → your PSA booking write. Day 0 the Python books in the dev
+    # store. To wire it: create the vault connection 'psa_booking_n8n' (same
+    # shape as psa_n8n above), then uncomment the two lines below (before the
+    # first start; after it, in Studio). A failed PSA call books nothing.
+    # integration: "n8n"
+    # connector_config: {connection: psa_booking_n8n, timeout: 60}
     yields:
       plan_id: "string"
       booked: "list"
@@ -812,12 +862,15 @@ agents:
     auto_store_yields: true
 
   # ─────────────────────────────────────────────────────────────────────────
-  # Human members — first-class, reached in their own inbox. Every gate
-  # DEFAULT-DENIES on silence (fallback -> held_for_review -> audit). `dual`
+  # Human members — first-class, reached in their own inbox. Nothing is booked
+  # on silence. If nobody answers within a seat's human_timeout_seconds, the
+  # request waits no longer: its Inbox card closes and the ticket records that
+  # no reply came. Nobody is chased automatically. fallback_on_timeout /
+  # fallback_response (held_for_review -> audit) are kept as the declared
+  # intent; on leafmesh 2.4.486 a dual seat's timeout routes nothing. `dual`
   # belongs on the human/boundary agent ONLY; these humans call CHAIN /
   # PROGRAMMATIC / EXECUTE agents, never another dual agent (dual→dual is an
-  # unbounded ping-pong the SDK warns on). Human→human escalation is the
-  # Manager SUPERVISOR's job (manager.escalation.targets), not a hardcoded wire.
+  # unbounded ping-pong the SDK warns on). There is no human→human wire.
   # ─────────────────────────────────────────────────────────────────────────
 
   staffing_partner_human:
@@ -834,16 +887,21 @@ agents:
     fallback_response:
       human_decision: held
       human_message: held_for_review
+    human_prompt_template: |
+      A staffing plan (or a below-floor utilisation alert) needs your call.
+      For a plan: reply "approved" to have the assignments booked, "rejected"
+      to stop it, or "hold". Only "approved" books anything; every other reply
+      (and any reply to an alert, e.g. "noted") is recorded in the audit log.
     yields:
-      human_message: "string"       # approved | held_for_review
+      human_message: "string"       # approved | rejected | hold | held_for_review
     inputs:
       plan_id: "object"
     can_call:
       # APPROVE → the booker BOOKS the assignment (the finisher finishes the job).
       - agent: "allocation_booker_agent"
         condition: "calling_agent_response.human_message == 'approved'"
-      # Anything else (held on silence, rejected) → recorded; the Manager
-      # escalates a held gate to the practice lead.
+      # Anything else (rejected / hold / noted / the held_for_review fallback)
+      # is recorded in the audit log.
       - agent: "bench_audit_logger_agent"
         condition: "calling_agent_response.human_message != 'approved'"
 
@@ -859,6 +917,15 @@ agents:
     fallback_response:
       human_decision: held
       human_message: held_for_review
+    human_prompt_template: |
+      A staffing plan has a conflict (someone is matched to two engagements) or
+      a draft performance review needs your sign-off.
+      For a plan: reply "approved" to book it, "rejected" to stop it, or "hold".
+      On approval the booker books in plan order and refuses any slice that
+      would take a consultant past 100%, so a double-booked person is booked
+      once and the rest is listed as rejected.
+      For a review: reply "signed" or "changes" (recorded in the audit log).
+      Only "approved" books anything; every other reply is recorded.
     yields:
       human_message: "string"
     inputs:
@@ -920,7 +987,7 @@ agents:
     name: "bench_audit_logger_agent"
     agent_type: "external"
     framework: "custom"
-    communication_type: "execute"
+    communication_type: "chain"
     description: "WORM audit — hash-chains every booking, decision, and held gate. Terminus."
     connector_config:
       sink_type: "local_file"

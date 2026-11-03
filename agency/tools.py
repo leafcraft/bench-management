@@ -10,6 +10,9 @@ To go live, wire the PSA/HRIS mcp block in configs/config.yaml (each named
 action becomes its own namespaced tool); these dev tools are the fallback
 contract.
 
+Whether a real PSA is wired is read from the vault (records 'psa_n8n' /
+'psa_mcp'), never from .env.
+
 Identity comes from CODE, not the model: `candidate_screening_agent`'s
 @pre_compose sets the current session id here before inference, and the atomic
 claim tool keys the backlog on it — the model only chooses a batch size.
@@ -22,17 +25,19 @@ from leafmesh import global_tool, LeafMeshLogger
 
 try:
     from ._shared import store
+    from ._shared.wiring import any_wired
 except ImportError:  # pragma: no cover — direct-run fallback
     import sys
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from _shared import store  # type: ignore
+    from _shared.wiring import any_wired  # type: ignore
 
 logger = LeafMeshLogger(__name__)
 
 # Set by candidate_screening_agent's @pre_compose (identity from code). All
-# parallel instances of one activation share the SAME session id, so a single
+# parallel copies of one activation share the SAME session id, so a single
 # module-level value is correct — the store keys the backlog on it and pops
-# atomically, so instances still get disjoint batches.
+# atomically, so copies still get disjoint batches.
 _CURRENT: dict[str, str] = {"session_id": ""}
 
 
@@ -40,9 +45,9 @@ def set_current_session(session_id: str) -> None:
     _CURRENT["session_id"] = str(session_id or "")
 
 
-def _connector_wired() -> bool:
-    """True if a real PSA/HRIS connector is configured (URL set)."""
-    return bool(os.getenv("PSA_MCP_URL") or os.getenv("PSA_WEBHOOK_URL"))
+async def _connector_wired() -> bool:
+    """True if a real PSA/HRIS is wired: the vault holds 'psa_n8n' or 'psa_mcp'."""
+    return await any_wired("psa_n8n", "psa_mcp")
 
 
 @global_tool(category="screening")
@@ -70,19 +75,19 @@ def claim_screening_batch(batch_size: int = 4, session_id: str = "") -> dict:
 
 
 @global_tool(category="bench")
-def read_open_opportunities() -> dict:
+async def read_open_opportunities() -> dict:
     """Read the open engagements needing staffing, with their required skills and
     headcount, to score claimed consultants against. Reads the seed store when no
     connector is wired; announces `available: false` if there is nothing to read.
     """
     opps = store.open_opportunities()
-    if not opps and _connector_wired():
+    if not opps and await _connector_wired():
         return {"available": False, "reason": "connector wired but returned no open opportunities"}
     return {"available": True, "open_opportunities": opps}
 
 
 @global_tool(category="bench")
-def read_bench_roster(only_available: bool = True) -> dict:
+async def read_bench_roster(only_available: bool = True) -> dict:
     """Read the bench roster (benched consultants + level + idle weeks). Use for
     context; the atomic per-batch claim is claim_screening_batch.
 
@@ -90,6 +95,6 @@ def read_bench_roster(only_available: bool = True) -> dict:
         only_available: True → only the benched (no active engagement).
     """
     rows = store.bench_roster(only_available=bool(only_available))
-    if not rows and _connector_wired():
+    if not rows and await _connector_wired():
         return {"available": False, "reason": "connector wired but returned an empty roster"}
     return {"available": True, "roster": rows}
