@@ -1,11 +1,11 @@
 """candidate_screening_agent — parallel candidate fan-out over the bench.
 
-One activation → N parallel instances (config: instances). Each copy atomically
+One activation → N parallel copies (config: scaling.copies.count). Each copy atomically
 CLAIMS a disjoint batch of benched consultants (claim_screening_batch, backed by
 the store's per-session queue) and scores them against the open opportunities.
 Because every copy claims a different batch, a large bench is screened in
 parallel with NO double-work, and the yields are list/sum-safe so
-`instances_handoff: last` combines the shortlists cleanly.
+`scaling.copies.handoff: last` combines the shortlists cleanly.
 
 @pre_compose  prime_screening — identity from CODE: set the current session id
               (so the atomic claim tool keys the backlog correctly) and seed the
@@ -79,7 +79,7 @@ def _parse(resp: Any) -> dict[str, Any]:
 
 def _dedup(rows: Any) -> list[dict[str, Any]]:
     """Dedup shortlist rows by (consultant_id, opportunity_id) — keeps the merge
-    of two instances' shortlists clean even if the bench overlapped a boundary."""
+    of two copies' shortlists clean even if the bench overlapped a boundary."""
     seen: set[tuple[str, str]] = set()
     out: list[dict[str, Any]] = []
     for r in rows or []:
@@ -96,7 +96,7 @@ def _dedup(rows: Any) -> list[dict[str, Any]]:
 
 async def normalise_screening(result: dict[str, Any], ctx: Any) -> dict[str, Any]:
     """@chain: make the merged shape honest and sum-safe. screened_count is
-    re-derived from the deduped shortlist so instance combination cannot inflate
+    re-derived from the deduped shortlist so copy combination cannot inflate
     it, and no escalation flag is emitted (screening shortlists; it does not
     decide routing — the allocation planner does)."""
     out = {**_DEFAULTS, **(result if isinstance(result, dict) else {})}

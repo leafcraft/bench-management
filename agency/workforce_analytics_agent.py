@@ -2,13 +2,15 @@
 skills inventory (SYSTEM, connector-backed + deterministic floors).
 
 This is the analytics ROLE, mode-dispatched (forecast | ingest | report |
-upsert | search). It is `agent_type: programmatic, integration: n8n` in
-config.yaml: in PRODUCTION the n8n workflow in front of your PSA/HRIS
-(PSA_WEBHOOK_URL) runs and the SDK passes its raw response here as the
-first arg — this module shapes it into the declared yields
-(@sdk.intelligence role). In DEV (no connector) it serves the bench feeds
-from agency/_shared/store.py so the full forecast → match → allocate chain
-runs day-0.
+upsert | search). It is `agent_type: programmatic` in config.yaml. In DEV
+(the shipped config: no `integration`) the SDK calls it with
+`llm_response=None` and it serves the bench feeds from
+agency/_shared/store.py, so the full forecast → match → allocate chain runs
+day-0. WIRED (`integration: "n8n"` + `connector_config: {connection:
+psa_n8n}` uncommented) the n8n workflow in front of your PSA/HRIS runs first
+and the SDK passes its reply here: a successful reply's `content` is shaped
+into the declared yields; a failed call is reported as a failed run (it is
+never replaced by dev-store numbers, which would look like real ones).
 
 WHY THIS IS PYTHON, NOT YAML / NOT THE WORKFLOW (the depth bar):
 the bench-ceiling, below-floor (65% billable for 3+ weeks) and idle
@@ -193,6 +195,17 @@ def _search(input_data: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _content(connector_response: dict[str, Any]) -> dict[str, Any]:
+    c = connector_response.get("content")
+    if isinstance(c, str):
+        try:
+            import json
+            c = json.loads(c)
+        except ValueError:
+            c = {}
+    return c if isinstance(c, dict) else {}
+
+
 def _shape_connector(raw: dict[str, Any], mode: str) -> dict[str, Any]:
     """@sdk.intelligence: map the n8n/PSA workflow's raw response into the
     declared yields, preserving keys it already provides. The deterministic
@@ -215,10 +228,16 @@ async def workforce_analytics_agent(llm_response, input_data, context):
     input_data = input_data or {}
     mode = _mode(input_data, llm_response)
 
-    # When the n8n connector is wired the SDK passes its raw response as the
-    # first arg — a non-empty dict means "shape this".
-    if isinstance(llm_response, dict) and llm_response:
-        computed = _shape_connector(llm_response, mode)
+    # When the n8n connector is wired the SDK passes its reply as the first arg:
+    # {"success", "content", "error", ...}. Shape a success; report a failure.
+    if isinstance(llm_response, dict) and llm_response.get("success") is False:
+        err = str(llm_response.get("error") or "the PSA workflow failed")
+        logger.warning(f"workforce_analytics_agent — PSA workflow failed: {err}")
+        return {**_DEFAULTS, "mode": mode, "success": False,
+                "error": f"PSA workflow failed: {err[:200]}",
+                "utilisation_briefing": f"No figures this run: the PSA workflow failed ({err[:120]})."}
+    if isinstance(llm_response, dict) and llm_response.get("success") is True:
+        computed = _shape_connector(_content(llm_response), mode)
         source = "psa_connector"
     elif mode == "ingest":
         computed = _ingest(input_data); source = "dev_store"

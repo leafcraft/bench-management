@@ -9,11 +9,12 @@ Boot order matters (SDK 2.4.131):
      bench_audit_logger_agent (must be after from_yaml, before start).
   4. leafmesh.start().
 
-Roles are defined in configs/config.yaml. workforce_analytics + weekly_bench_sweep
-are n8n connector agents against your PSA / HRIS / BI tool (PSA_WEBHOOK_URL /
-BENCH_REPORT_WEBHOOK_URL); workforce analytics carries a co-located shaper that
-serves a dev store (agency/_shared/store.py) day-0 and computes the bench/
-below-floor floor. candidate_screening, staffing_coordinator and
+Roles are defined in configs/config.yaml. workforce_analytics, weekly_bench_sweep
+and the allocation booker serve the dev store (agency/_shared/store.py) day-0;
+each can be pointed at an n8n workflow in front of your PSA / HRIS / BI tool by
+uncommenting its `integration` + `connector_config: {connection: <vault record>}`
+lines (psa_n8n / bench_report_n8n / psa_booking_n8n). Workforce analytics
+computes the bench / below-floor floor in code either way. candidate_screening, staffing_coordinator and
 talent_development are LLM agents with @pre_compose (pull their own context) +
 @chain (enforce the deterministic floor). The allocation booker is the finisher;
 the ESAT salted-hash ledger and the WORM audit sink registered below complete the
@@ -50,8 +51,8 @@ async def main():
     leafmesh.event_bus.subscribe(EventType.MANAGER_INTERVENTION, _on_manager_intervention)
     leafmesh.event_bus.subscribe(EventType.INTERVENTION_NEEDED, _on_intervention_needed)
     leafmesh.event_bus.subscribe(EventType.HUMAN_INPUT_TIMEOUT, _on_human_input_timeout)
-    try: await leafmesh.enable_self_healing()
-    except AttributeError: pass
+    # Self-healing is automatic — the SDK enables it during start() on
+    # every operator-facing mesh. No call is needed.
     logger.info("bench-management — Bench Management mesh running")
 
     stop = asyncio.Event(); loop = asyncio.get_running_loop()
