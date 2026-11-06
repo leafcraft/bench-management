@@ -15,7 +15,7 @@ the assignment plan, with the routing floors enforced in code.
               → engagement lead, structural gap → practice lead) cannot be
               softened by a hallucinated flag.
 
-Yields (config.yaml): matches, unmatched_people, unmatched_opportunities,
+Yields (set in the configuration): matches, unmatched_people, unmatched_opportunities,
 skills_gaps, staffing_briefing, plan_id, assignments, conflicts,
 requires_engagement_lead_review, requires_practice_lead_review.
 """
@@ -138,7 +138,7 @@ async def enforce_allocation_floors(result: dict[str, Any], ctx: Any) -> dict[st
         )
 
     # Stash the plan so the allocation booker (finisher) can recover it AFTER the
-    # human approval gate — the SDK resumes the chain with only the human reply,
+    # human approval step — the SDK resumes the chain with only the human reply,
     # so the assignments would otherwise be dropped across the gate.
     sid = resolve_session_id({}, ctx if isinstance(ctx, dict) else {})
     if sid:
