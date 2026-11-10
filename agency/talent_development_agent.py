@@ -13,7 +13,7 @@ the idle + retention-risk floors enforced in code.
               is senior/staff/partner. Losing a senior without the practice
               lead hearing first is not waivable by a prompt.
 
-Yields (config.yaml): idle_2w, idle_4w, avg_idle_weeks, recommendations,
+Yields (set in the configuration): idle_2w, idle_4w, avg_idle_weeks, recommendations,
 plan_id, employee_id, current_level, target_role_6mo, skill_bets,
 internal_projects, certifications, retention_risk_score,
 employee_facing_narrative, confidence, requires_practice_lead_review.

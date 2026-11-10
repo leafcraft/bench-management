@@ -1,19 +1,19 @@
 {
   "_entry_point": "new_project_kickoff",
-  "_description": "New 6-month project needs 4 senior consultants \u2014 staffing_coordinator finds 7 candidates and builds the assignment plan.",
+  "_description": "Brightwater Health signed data platform phase 2 (2 seats from 16 Nov). The coordinator opens the case, analytics serves the forecast, screening copies split the bench, and the staffing coordinator plans Lina + Diego for it.",
   "payload": {
-    "plan_id": "alloc-pegasus-q3",
-    "project_id": "proj-pegasus-q3",
-    "client_id": "cli-pegasus-industries",
+    "plan_id": "",
+    "opportunity_id": "opp-brightwater-data-p2",
+    "client": "Brightwater Health",
     "duration_weeks": 26,
     "required_skills": [
-      "market_research",
-      "european_regulatory",
-      "B2B_logistics",
-      "financial_modeling"
+      "data-engineering",
+      "spark",
+      "python"
     ],
-    "required_level": "senior",
+    "required_level": "mid",
+    "headcount": 2,
     "billable_target_pct": 0.8,
-    "start_date": "2026-07-01"
+    "start_date": "2026-11-16"
   }
 }

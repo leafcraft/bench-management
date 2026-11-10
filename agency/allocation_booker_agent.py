@@ -1,6 +1,6 @@
 """allocation_booker_agent — the FINISHER / actuator that finishes the job.
 
-It sits BEHIND the human approval gate. It never approves — it re-checks that a
+It sits BEHIND the human approval step. It never approves — it re-checks that a
 human actually approved, refuses to double-book, RENDERS the booking artifact,
 and records the assignment. It is the concrete "@chain fails closed":
 
@@ -17,13 +17,20 @@ and records the assignment. It is the concrete "@chain fails closed":
   e) two-layer defence — the body short-circuits before writing; the @chain
      floor (enforce_booking_floors) re-checks the approval + renders/deletes
      independently.
+  f) idempotent — an assignment already booked under the same plan is not
+     booked again (a re-approval or a replayed hand-off books nothing new).
 
-PROD — point PSA_BOOKING_WEBHOOK_URL at an n8n workflow in front of your PSA
-(Kantata/Mavenlink, Workday…); its ack is shaped into yields. DEV (no connector)
-— the booker RECORDS each confirmed assignment in the store (a real, verifiable
-record, NOT a faked ack) so the approve → book chain runs day-0.
+DEV (the shipped config: no `integration`) — the booker RECORDS each confirmed
+assignment in the store (a real, verifiable record, NOT a faked ack) so the
+approve → book chain runs day-0, behind the store's double-booking floor.
+WIRED — uncomment `integration: "n8n"` + `connector_config: {connection:
+psa_booking_n8n}` on the agent: the n8n workflow in front of your PSA
+(Kantata/Mavenlink, Workday…) runs first and does the write, so your PSA's own
+allocation rules apply to it; this code shapes a successful ack's `content`
+into yields. A failed PSA call books nothing and is recorded as blocked. The
+approval re-check (@chain) applies on both paths.
 
-Yields (config.yaml): plan_id, booked, assignment_ids, booked_count, rejected,
+Yields (set in the configuration): plan_id, booked, assignment_ids, booked_count, rejected,
 booking_ok, booking_summary, artifact_path, status, block_reasons.
 """
 from __future__ import annotations
@@ -155,6 +162,10 @@ def _book_dev(assignments: list[dict[str, Any]], plan_id: str) -> dict[str, Any]
     for a in assignments:
         cid = a["consultant_id"]
         alloc = a["allocation_pct"]
+        if plan_id and store.already_booked(plan_id, cid, a["opportunity_id"]):
+            # Idempotent: a re-approval / replayed hand-off never books twice.
+            rejected.append({**a, "reason": "already booked under this plan"})
+            continue
         already = store.consultant_allocation_pct(cid) + pending.get(cid, 0)
         if already + alloc > store.MAX_ALLOCATION_PCT:
             rejected.append({**a, "reason": f"would exceed 100% (already {already}%)"})
@@ -173,9 +184,8 @@ def _book_dev(assignments: list[dict[str, Any]], plan_id: str) -> dict[str, Any]
 
 
 def _shape_connector_result(raw: dict[str, Any], plan_id: str) -> dict[str, Any]:
-    """Map the PSA booking workflow's ack into yields. Whatever the workflow
-    returns, the store still owns the double-booking floor, so the ledger and the
-    verification stay coherent."""
+    """Map the PSA booking workflow's ack (its reply content) into yields. Only
+    assignments the PSA acknowledged with an id count as booked."""
     booked_raw = raw.get("booked") or raw.get("assignments") or []
     ids = [str(b.get("assignment_id") or b.get("id"))
            for b in booked_raw if isinstance(b, dict) and (b.get("assignment_id") or b.get("id"))]
@@ -258,7 +268,10 @@ async def enforce_booking_floors(result: Any, ctx: Any) -> dict[str, Any]:
         # there was nothing to book — no artifact, record why.
         out["status"] = "blocked"
         _delete_partial(out)
-        if out.get("rejected"):
+        if any("PSA booking call failed" in str(r.get("reason", ""))
+               for r in out.get("rejected") or [] if isinstance(r, dict)):
+            out["block_reasons"].append("the PSA booking call failed — nothing was booked")
+        elif out.get("rejected"):
             out["block_reasons"].append("every assignment rejected at the double-booking floor")
         else:
             out["block_reasons"].append("approved but no assignments to book")
@@ -290,8 +303,20 @@ async def allocation_booker_agent(llm_response: Any, input_data: Any, context: A
         logger.info(f"[booker] approved but no assignments to book (plan={plan_id!r})")
         return out
 
-    if isinstance(llm_response, dict) and llm_response:
-        computed = _shape_connector_result(llm_response, plan_id)
+    if isinstance(llm_response, dict) and llm_response.get("success") is False:
+        err = str(llm_response.get("error") or "the PSA booking workflow failed")
+        logger.warning(f"[booker] PSA booking call failed (plan={plan_id!r}): {err}")
+        return {**out, "rejected": [{**a, "reason": f"PSA booking call failed: {err[:160]}"}
+                                    for a in assignments]}
+    if isinstance(llm_response, dict) and llm_response.get("success") is True:
+        content = llm_response.get("content")
+        if isinstance(content, str):
+            try:
+                import json
+                content = json.loads(content)
+            except ValueError:
+                content = {}
+        computed = _shape_connector_result(content if isinstance(content, dict) else {}, plan_id)
         source = "psa_booking_connector"
     else:
         res = _book_dev(assignments, plan_id)
