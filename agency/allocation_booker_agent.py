@@ -12,7 +12,7 @@ and records the assignment. It is the concrete "@chain fails closed":
      would push a consultant past 100% (store.book_assignment raises).
   c) render the real artifact to ./out; on a tripped floor DELETE the partial
      and record status="blocked" with reasons — never a half-issued booking.
-  d) dev-store recovery — after the HITL gate the upstream plan is dropped, so
+  d) dev-store recovery — after the human step the upstream plan is dropped, so
      the booker recovers it from the session stash / input.
   e) two-layer defence — the body short-circuits before writing; the @chain
      floor (enforce_booking_floors) re-checks the approval + renders/deletes
@@ -97,7 +97,7 @@ def _pick(input_data: dict[str, Any], key: str, default: Any) -> Any:
 
 def _signal(input_data: dict[str, Any]) -> str:
     """The human verdict, from wherever the SDK delivered it (shape-tolerant)."""
-    for key in ("human_message", "human_decision", "decision", "message"):
+    for key in ("verdict", "human_message", "human_decision", "decision", "message"):
         val = _pick(input_data, key, "")
         if isinstance(val, str) and val.strip():
             return val.strip().lower()

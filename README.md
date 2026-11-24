@@ -3,7 +3,7 @@
 Resource & staffing operations for a professional-services firm, run as a **pod**:
 a coordinator that owns each staffing case, a team of specialists that read the
 bench and plan the allocation, a **finisher** that books the approved assignment
-and produces the real artifact, named humans behind the gates (nothing is booked
+and produces the real artifact, named humans owning the decisions (nothing is booked
 on silence), and the Manager as supervisor. **YAML-first**: utilisation, bench and skills data live in
 YOUR PSA / HRIS (Kantata/Mavenlink, Workday, SAP SuccessFactors, BambooHR…)
 behind n8n / MCP connectors — never in template SQLite as a system of record.
@@ -45,8 +45,8 @@ plans the allocation and builds the assignment plan (`plan-3f9c01ab2d`).
 
 One consultant, **Lina**, is matched to two opportunities, so the
 coordinator's `@chain` re-derives the conflict and routes the plan to the
-**engagement lead**. If nobody answers within four hours, the card closes and
-the ticket records that no reply came — nothing is booked, and nobody is
+**engagement lead**. If nobody answers within four hours, the seat's default
+reply, `hold`, is recorded in the audit log — nothing is booked, and nobody is
 chased automatically. On approval, `allocation_booker_agent`, the
 **finisher**, re-checks that a human actually approved (an unknown verdict
 fails closed), refuses any slice that would push a consultant past 100% (so
@@ -71,8 +71,8 @@ the staffing partner; idle staff get a retention-grade career path instead of a
 generic training list. The **one-human / one-agent / one-system per stage**
 discipline holds throughout: the agent produces, the human decides, the system
 records — no stage advances on an agent's own authority, and **silence never
-advances a decision** (an unanswered card closes and the ticket records it;
-nothing is booked). The finisher is the load-bearing control: reaching it is not
+advances a decision** (an unanswered seat's default `hold` goes to the audit
+log; nothing is booked). The finisher is the load-bearing control: reaching it is not
 approval, and a partial booking is deleted rather than half-issued. State stays in
 the systems the firm already runs, so nothing here becomes a shadow system of
 record.
@@ -82,7 +82,7 @@ record.
 ### Tier 1 — Boot (required to start)
 | Var | Why |
 |---|---|
-| `LEAFMESH_LICENSE_KEY` | SDK license (get one at leafcraft.ai) |
+| `LEAFMESH_LICENSE_KEY` | Not kept in `.env`: `create-leafmesh --start` (or `--load`) asks for it once at the first start to sign this environment in (leafmesh 2.4.538+) |
 | `OPENAI_API_KEY` | `gpt-4o-mini` agents (coordinator, screening, staffing, ESAT, manager) |
 | `ANTHROPIC_API_KEY` | `claude-sonnet-4-6` agents (talent development, performance review) |
 | `REDIS_HOST` / `REDIS_PORT` / `REDIS_PASSWORD` | session + state store (defaults to localhost:6379) |
@@ -103,7 +103,7 @@ python main.py                           # API at http://127.0.0.1:18820/docs
 
 API calls (from `/docs`, curl or a script) need your organisation's API key in the `X-API-Key` header: make one in Studio → API Keys → Generate Key, then `export LEAFCRAFT_API_KEY=<the key>` for the examples below. The agency itself runs without it.
 
-`requirements.txt` pins `leafmesh>=2.4.509` + `apscheduler>=3.10` (for the weekly
+`requirements.txt` pins `leafmesh>=2.4.540` + `apscheduler>=3.10` (for the weekly
 `wake_up` crons). Do **not** install `leafmesh[all]` on Python 3.12+ — it pulls
 `cchardet`, which has no wheel there; add only the specific extras you wire.
 
@@ -162,29 +162,34 @@ PSA/HRIS; the floors still apply.
 
 | Agent | Role (job title) | Responsibilities | Can perform |
 |---|---|---|---|
-| `bench_coordinator_agent` | Bench coordinator | Owns each staffing case end to end; opens it, orchestrates, keeps status, single point of contact. Never reads the PSA, matches, or books | llm (pure YAML) → analytics on `open_case`; talent dev on `talent`; practice lead on `escalate` |
+| `bench_coordinator_agent` | Bench coordinator | Owns each staffing case end to end; opens it, orchestrates, keeps status, single point of contact. Never reads the PSA, matches, or books | llm (pure YAML) + playbook (`open_case`, `status`, `talent_handoff`, `escalate`) → analytics on `open_case`; talent dev on `talent`; practice lead on `escalate` |
 | `workforce_analytics_agent` | Workforce analyst | Capacity forecast (30/60/90d + bench %), utilisation ledger, skills inventory — mode-dispatched from the dev store day-0 / your PSA/HRIS via n8n when wired. **Computes the bench % + below-floor list (the floor)** | programmatic Python (n8n when wired); Monday 09:00 `wake_up` (timezone-pinned) → screening on `forecast`; bench > 15% → practice lead; below-floor → staffing partner |
-| `candidate_screening_agent` | Candidate-screening analyst | Fan out over the bench: each **parallel copy** atomically claims a disjoint batch (`claim_screening_batch`) and shortlists candidates against open opportunities | llm ×2 copies (`scaling.copies: {count: 2, handoff: last}`) + `@pre_compose`/`@chain` module → staffing coordinator on a non-empty shortlist |
+| `candidate_screening_agent` | Candidate-screening analyst | Fan out over the bench: each **parallel copy** atomically claims a disjoint batch (`claim_screening_batch`) and shortlists candidates against open opportunities | llm ×2 copies (`scaling.copies: {count: 2, handoff: last}`) + playbook (`claim_batch`, `score_batch`) + `@pre_compose`/`@chain` module → staffing coordinator on a non-empty shortlist |
 | `staffing_coordinator_agent` | Staffing coordinator | Turn the shortlist into an assignment plan. **`@pre_compose` pulls supply/demand; `@chain` re-derives double-booking + structural gaps and forces the routing flags** | llm **super-agent** (dict-tuned) + module → engagement lead on conflict; structural gap → practice lead; clean → staffing partner |
 | `talent_development_agent` | Talent development lead | Recommend reskilling bets, draft 6-month retention-grade career paths. **`@pre_compose` pulls the idle ledger; `@chain` re-asserts idle detection + senior-flight-risk routing** | llm (claude-sonnet-4-6) + playbook + module → practice lead on 4-week idle / senior flight risk; talent ops on idle/reskilling |
-| `performance_review_agent` | Performance-review writer | Draft Q/annual reviews from feedback + utilisation + skill growth; composite score + rating bands | llm (claude-sonnet-4-6) → practice lead for calibration tails; engagement lead for normal range |
-| `esat_survey_agent` | Employee-experience analyst | Launch anonymised pulse surveys; analyse closed ones — engagement index, themes, HRBP flags | llm (gpt-4o-mini) + Python salted-hash ledger → talent ops when the floor or a hot theme trips |
+| `performance_review_agent` | Performance-review writer | Draft Q/annual reviews from feedback + utilisation + skill growth; composite score + rating bands | llm (claude-sonnet-4-6) + playbook (`evidence_counts`, `draft_review`) → practice lead for calibration tails; engagement lead for normal range |
+| `esat_survey_agent` | Employee-experience analyst | Launch anonymised pulse surveys; analyse closed ones — engagement index, themes, HRBP flags | llm (gpt-4o-mini) + playbook (`pulse`, `analyse`) + Python salted-hash ledger → talent ops when the floor or a hot theme trips |
 | `weekly_bench_sweep_agent` | Bench-report runner | Build the Monday bench report (bench %, below-floor, idle, open demand, action items) — dev store day-0, your PSA/BI via n8n when wired | programmatic Python; Monday 08:00 `wake_up` (timezone-pinned) + `weekly_bench_report` entry → audit |
-| `allocation_booker_agent` | Allocation booker (**finisher**) | The executor after the gate: re-check the human approval (fail closed on unknown), refuse to double-book, never book the same plan twice, **render the booking artifact to `./out`, delete it on a blocked floor**, record the assignment | programmatic Python + `@chain` two-layer floor (n8n PSA write when wired); dev store books + renders day-0 → audit (terminal) |
-| `staffing_partner_human` | Staffing partner | Owns assignment decisions on clean plans; gets below-floor alerts | human (4h) → booker on `approved`; any other reply → audit |
-| `engagement_lead_human` | Engagement lead | Resolve assignment conflicts / double-bookings; sign normal-range reviews | human (4h) → booker on `approved`; any other reply → audit |
+| `allocation_booker_agent` | Allocation booker (**finisher**) | The executor after the decision: re-check the human approval (fail closed on unknown), refuse to double-book, never book the same plan twice, **render the booking artifact to `./out`, delete it on a blocked floor**, record the assignment | programmatic Python + `@chain` two-layer floor (n8n PSA write when wired); dev store books + renders day-0 → audit (terminal) |
+| `staffing_partner_human` | Staffing partner | Owns assignment decisions on clean plans; gets below-floor alerts | human (4h) → booker on verdict `approve`; any other verdict → audit |
+| `engagement_lead_human` | Engagement lead | Resolve assignment conflicts / double-bookings; sign normal-range reviews | human (4h) → booker on verdict `approve`; any other verdict → audit |
 | `talent_ops_human` | Talent ops / HRBP | Reskilling + training pathways; HRBP review of survey signals | human (6h) → audit |
 | `practice_lead_human` | Practice lead | Bench % authority, structural-gap calls, retention escalation, calibration; gets the Manager's error escalations | human (8h) → audit |
 | `bench_audit_logger_agent` | Compliance recorder | Append-only hash-chained WORM audit of every terminal decision | external (custom intelligence fn registered in main.py); terminal |
 
 ### When nobody answers
 
+The Inbox has no buttons. Each person types a reply, and a small reply reader
+(`gpt-4o-mini`) turns it into a `verdict`: `approve` or `hold` on the two
+approval seats, `hold` on talent ops and the practice lead, and `answer` on any
+seat when the person answered an agent's question (it goes back to only the
+agent that asked). Anything that is not a clear yes reads as `hold`.
+
 Nothing is booked on silence. If nobody answers a seat within its time
 (staffing partner and engagement lead 4h, talent ops 6h, practice lead 8h), the
-request waits no longer: its Inbox card closes and the ticket records that no
-reply came. Nobody is chased automatically. Each seat keeps
-`fallback_on_timeout` / `fallback_response: held_for_review` in config as the
-declared intent; on leafmesh 2.4.486 a timeout on these seats routes nothing.
+seat's default reply (`fallback_response`: `verdict: hold`, `held_for_review`)
+goes through its routes like any reply and is recorded in the audit log.
+Nobody is chased automatically, and no person seat calls another.
 
 The **Manager** is the supervisor. It escalates to the practice lead only on
 errors: a non-retryable error (sign-in, bad request, bad config) the first time

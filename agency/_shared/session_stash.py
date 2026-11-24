@@ -5,7 +5,7 @@ resumes the chain with ONLY the human-response meta fields (`human_message`,
 `human_decision`, …) — the assignment plan flowing through the chain is NOT
 re-delivered to the finisher. So the staffing coordinator stashes the full plan
 here, keyed by `session_id`, and the allocation booker recovers it after the
-human gate.
+human step.
 
 In-process only — survives the human wait because the mesh is one process. A
 multi-replica deployment swaps this for the Redis session store; the get/put

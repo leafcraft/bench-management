@@ -14,8 +14,8 @@ claim a disjoint batch of the bench and shortlist candidates against the open
 opportunities. The combined shortlist reaches `staffing_coordinator_agent` — a
 **super-agent** that plans the allocation (`plan-3f9c01ab2d`). **Lina** is
 double-booked, so the `@chain` re-derives the conflict and routes to the
-**engagement lead** (4h; if nobody answers, the card closes and the ticket
-records it — nothing is booked and nobody is chased). On approval,
+**engagement lead** (4h; if nobody answers, the default reply `hold` is
+recorded in the audit log — nothing is booked and nobody is chased). On approval,
 `allocation_booker_agent` — the **finisher** — re-checks the approval (unknown
 verdict fails closed), refuses to double-book or to book the same plan twice,
 renders the booking confirmation to `./out`, and records it. The same forecast
@@ -29,7 +29,7 @@ Every terminal decision is appended to a hash-chained WORM audit.
 Utilisation is the firm's P&L. This **pod** turns the weekly bench scramble into
 a forward flow with the alert thresholds visible as `can_call` wires instead of
 buried in code or someone's head, keeps the high-judgment calls behind named
-human gates that never approve on silence, and keeps the system of record in the PSA/HRIS the firm
+human steps that never approve on silence, and keeps the system of record in the PSA/HRIS the firm
 already runs. One human, one agent, one system per stage: the agent produces, the
 human decides, the system records — and silence never advances a decision.
 
@@ -84,8 +84,9 @@ draft_performance_review ──▶ performance_review_agent (llm)
 launch_esat_pulse / analyse_esat_survey ──▶ esat_survey_agent (llm + salt ledger)
         requires_hrbp_review ─▶ talent_ops (human)
 
-Every human reply other than "approved" ──▶ bench_audit_logger_agent [terminal]
-Silence routes nothing: the card closes and the ticket records it. No human→human wire.
+Every human verdict other than approve ──▶ bench_audit_logger_agent [terminal]
+(answer goes back to only the agent that asked)
+Silence: the default reply (hold) goes to the audit log. No human→human wire.
 ```
 
 ## Actor inventory
@@ -207,16 +208,16 @@ Silence routes nothing: the card closes and the ticket records it. No human→hu
   books in the store (a real record, never a faked ack); wired, the PSA
   workflow does the write (its own allocation rules apply) and a failed call
   books nothing. → audit terminus.
-- **human gates** — staffing partner (4h), engagement lead (4h), talent ops
-  (6h), practice lead (8h). If nobody answers in time, the card closes and the
-  ticket records that no reply came; nothing is booked, nobody is chased. All
-  keep `fallback_on_timeout: true` + `fallback_response: held_for_review`
-  (routed to the audit sink) as the declared intent — on leafmesh 2.4.486 a
-  `dual` seat's timeout routes nothing. The two approval seats carry a
-  `human_prompt_template` naming the reply words; only `approved` books.
-  `dual` only on these boundary agents; they call chain/programmatic agents,
-  never another `dual` agent. `operator_ids` unset → shared inbox. No
-  human→human wire.
+- **human steps** — staffing partner (4h), engagement lead (4h), talent ops
+  (6h), practice lead (8h). Each is `chain` with a `reply_reader`
+  (`gpt-4o-mini`) that turns the typed reply into a `verdict`; the routes
+  read `verdict`. If nobody answers in time, `fallback_on_timeout: true` +
+  `fallback_response` (`verdict: hold`, `held_for_review`) goes through the
+  routes like any reply and lands in the audit sink; nothing is booked,
+  nobody is chased. On the two approval seats only the verdict `approve`
+  books; `answer` goes back to only the agent that asked. The seats call
+  chain/programmatic agents, never another person seat. `operator_ids`
+  unset → shared inbox. No human→human wire.
 - **bench_audit_logger_agent** — external `framework: custom`; registered in
   `main.py` via `audit_logger.register(leafmesh, "bench_audit_logger_agent")`.
   Terminal.
@@ -229,14 +230,15 @@ Silence routes nothing: the card closes and the ticket records it. No human→hu
 `skills_search`, `career_path_request`, `promotion_readiness`,
 `draft_performance_review`, `launch_esat_pulse`, `analyse_esat_survey`, plus
 direct-call doors for candidate screening and the staffing coordinator, and a
-`staffing_decision` HITL-resume door. Every entry is `condition: always`.
+`staffing_decision` HITL-resume door. Every entry is taken when named (an
+entry point has no condition since SDK 2.4.533).
 
 ## Controls / trust
 
 - **Coordinator + finisher + supervisor** — a coordinator owns each case; the
-  finisher is the only actuator (behind the gate, fails closed, deletes on
+  finisher is the only actuator (behind the decision, fails closed, deletes on
   block, idempotent per plan); the Manager supervises errors.
-- **Human gates** on every high-judgment / irreversible step; nothing is
+- **Human steps** on every high-judgment / irreversible step; nothing is
   booked on silence.
 - **Visible alert wires + enforced floors** — routing thresholds are `can_call`
   conditions (legible); the values they fire on (bench %, below-floor, idle
@@ -253,12 +255,12 @@ direct-call doors for candidate screening and the staffing coordinator, and a
 ## 2.4.131 correctness
 
 Every agent has an explicit `name:`; every llm prompt ends with an OUTPUT
-CONTRACT naming exactly its yields; `dual` is only on human boundary agents (no
-dual→dual — verified 0 dual warnings at load); the `mcp:` block is commented (no
+CONTRACT naming exactly its yields; every agent, person seats included, is
+`chain` (no person seat calls another); the `mcp:` block is commented (no
 empty `${VAR:}` url); `max_tool_calls_per_message: 15` on the tool-chaining
 agents; every llm agent fn is `async def f(llm_response, input_data, context)`;
 `super_agent` is dict form; `timeouts.llm_hard_timeout_s` lands with the 2.4.131
-floor. `requirements.txt` is core-only (`leafmesh>=2.4.509` + `apscheduler>=3.10`).
+floor. `requirements.txt` is core-only (`leafmesh>=2.4.540` + `apscheduler>=3.10`).
 
 ## Config pointer
 
