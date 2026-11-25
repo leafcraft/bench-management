@@ -260,7 +260,7 @@ CONTRACT naming exactly its yields; every agent, person seats included, is
 empty `${VAR:}` url); `max_tool_calls_per_message: 15` on the tool-chaining
 agents; every llm agent fn is `async def f(llm_response, input_data, context)`;
 `super_agent` is dict form; `timeouts.llm_hard_timeout_s` lands with the 2.4.131
-floor. `requirements.txt` is core-only (`leafmesh>=2.4.540` + `apscheduler>=3.10`).
+floor. `requirements.txt` is core-only (`leafmesh>=2.4.542` + `apscheduler>=3.10`).
 
 ## Config pointer
 

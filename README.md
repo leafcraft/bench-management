@@ -103,7 +103,7 @@ python main.py                           # API at http://127.0.0.1:18820/docs
 
 API calls (from `/docs`, curl or a script) need your organisation's API key in the `X-API-Key` header: make one in Studio → API Keys → Generate Key, then `export LEAFCRAFT_API_KEY=<the key>` for the examples below. The agency itself runs without it.
 
-`requirements.txt` pins `leafmesh>=2.4.540` + `apscheduler>=3.10` (for the weekly
+`requirements.txt` pins `leafmesh>=2.4.542` + `apscheduler>=3.10` (for the weekly
 `wake_up` crons). Do **not** install `leafmesh[all]` on Python 3.12+ — it pulls
 `cchardet`, which has no wheel there; add only the specific extras you wire.
 
